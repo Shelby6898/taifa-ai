@@ -1,0 +1,16 @@
+# Dependencies
+**/node_modules/
+
+# Runtime/generated state — not source of truth, regenerates automatically
+backend/memory/
+
+# Build output
+frontend/build/
+
+# Environment files (if any are ever added — never commit secrets)
+.env
+.env.local
+
+# OS/editor cruft
+.DS_Store
+*.swp
