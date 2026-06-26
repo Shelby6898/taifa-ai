@@ -7,8 +7,10 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, startWatching } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent } = require("./generateFileContent");
+const { generateFileContent, generateFix } = require("./generateFileContent");
 const { stripCodeFences } = require("./stripCodeFences");
+const { parseFixCommand } = require("./fixCommandParser");
+const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
@@ -128,6 +130,88 @@ async function handleWriteCommand(parsedCommand, res) {
   }
 }
 
+async function handleFixCommand(fixCommand, res) {
+  if (fixCommand.malformed) {
+    return res.status(400).json({
+      success: false,
+      action: "fix_rejected",
+      reason: "No error text provided. Use: fix this: <paste your error or stack trace>"
+    });
+  }
+
+  const { errorText } = fixCommand;
+  const workspaceDir = require("path").join(__dirname, "..", "workspace");
+
+  let relativePath = findWorkspaceRelativePath(errorText, workspaceDir);
+  let locationMethod = "stack_trace";
+
+  if (!relativePath) {
+    const matches = searchIndex(errorText, 1);
+    if (matches.length > 0) {
+      relativePath = matches[0].path;
+      locationMethod = "keyword_search";
+    }
+  }
+
+  if (!relativePath) {
+    return res.json({
+      success: false,
+      action: "fix_not_located",
+      reason: "Could not locate a relevant file from this error. Try including a stack trace, or mention the filename directly."
+    });
+  }
+
+  const safetyCheck = isPathSafe(relativePath);
+  if (!safetyCheck.safe) {
+    return res.status(400).json({
+      success: false,
+      action: "write_rejected",
+      reason: safetyCheck.reason,
+      attemptedPath: relativePath
+    });
+  }
+
+  let existingContent;
+  try {
+    existingContent = fs.readFileSync(safetyCheck.resolvedPath, "utf-8");
+  } catch (err) {
+    return res.status(400).json({
+      success: false,
+      action: "fix_rejected",
+      reason: `Located path ${relativePath} but could not read it: ${err.message}`
+    });
+  }
+
+  try {
+    const rawGenerated = await generateFix({
+      targetPath: relativePath,
+      errorText,
+      existingContent
+    });
+
+    const cleanedContent = stripCodeFences(rawGenerated);
+
+    return res.json({
+      success: true,
+      action: "propose_write",
+      mode: "edit",
+      targetPath: relativePath,
+      resolvedPath: safetyCheck.resolvedPath,
+      fileExists: true,
+      before: existingContent,
+      after: cleanedContent,
+      locationMethod
+    });
+  } catch (err) {
+    console.error("Fix generation failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      action: "generation_failed",
+      reason: err.message
+    });
+  }
+}
+
 app.post("/api/chat", async (req, res) => {
   const { prompt, history } = req.body;
 
@@ -157,6 +241,11 @@ app.post("/api/chat", async (req, res) => {
   const parsedCommand = parseWriteCommand(prompt);
   if (parsedCommand.isWriteCommand) {
     return handleWriteCommand(parsedCommand, res);
+  }
+
+  const fixCommand = parseFixCommand(prompt);
+  if (fixCommand.isFixCommand) {
+    return handleFixCommand(fixCommand, res);
   }
 
   const fullPrompt = buildFullPrompt(prompt, history);

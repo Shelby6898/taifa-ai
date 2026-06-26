@@ -167,8 +167,15 @@ function Chat() {
           <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
             Proposed {pendingWrite.mode === "edit" ? "edit" : "new file"}: {pendingWrite.targetPath}
           </p>
+          {pendingWrite.locationMethod && (
+            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: pendingWrite.locationMethod === "stack_trace" ? "#28a745" : "#e0a800" }}>
+              {pendingWrite.locationMethod === "stack_trace"
+                ? "📍 Found via stack trace"
+                : "🔍 Best guess via keyword search — review carefully"}
+            </p>
+          )}
 
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>BEFORE</div>
               <pre style={{ background: "#f5f5f5", padding: 8, borderRadius: 4, fontSize: 12, overflowX: "auto", minHeight: 60 }}>
