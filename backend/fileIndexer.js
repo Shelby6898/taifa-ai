@@ -82,6 +82,25 @@ function searchIndex(query, topN = 3) {
   return scored.slice(0, topN);
 }
 
+// Returns the ENTIRE indexed workspace, formatted as one block —
+// used for documentation generation, where we want a full picture
+// of the project rather than a relevance-filtered subset.
+// Known limitation: this has no size cap. On a small workspace this
+// is fine; on a large one it will exceed the model's context window.
+// A future version would need per-file summarization before this
+// becomes safe at scale.
+function formatFullIndex() {
+  const index = loadIndex();
+
+  if (index.length === 0) {
+    return "";
+  }
+
+  return index
+    .map((file) => `--- ${file.path} ---\n${file.snippet}`)
+    .join("\n\n");
+}
+
 function debouncedRebuild() {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
@@ -109,10 +128,9 @@ function startWatching() {
 
   console.log(`[fileIndexer] Watching ${WORKSPACE_DIR} for changes`);
 
-  // Build the index once immediately on startup, so it's not empty/stale
   buildIndex();
 
   return watcher;
 }
 
-module.exports = { buildIndex, loadIndex, searchIndex, startWatching };
+module.exports = { buildIndex, loadIndex, searchIndex, formatFullIndex, startWatching };

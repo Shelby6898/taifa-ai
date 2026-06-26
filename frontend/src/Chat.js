@@ -174,6 +174,11 @@ function Chat() {
                 : "🔍 Best guess via keyword search — review carefully"}
             </p>
           )}
+          {pendingWrite.isDocumentation && (
+            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#e0a800", fontWeight: "bold" }}>
+              ⚠️ AI-generated documentation — technical claims (libraries, frameworks, architecture) may be inaccurate. Verify against the actual file content below before approving.
+            </p>
+          )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
             <div style={{ flex: 1 }}>

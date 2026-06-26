@@ -4,13 +4,14 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { backupExistingFile } = require("./backupManager");
-const { searchIndex, buildIndex, startWatching } = require("./fileIndexer");
+const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation } = require("./generateFileContent");
 const { stripCodeFences } = require("./stripCodeFences");
 const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
+const { parseDocumentCommand } = require("./documentCommandParser");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
@@ -212,6 +213,63 @@ async function handleFixCommand(fixCommand, res) {
   }
 }
 
+async function handleDocumentCommand(res) {
+  const fullIndex = formatFullIndex();
+
+  if (!fullIndex) {
+    return res.json({
+      success: false,
+      action: "fix_not_located",
+      reason: "No files found in workspace to document."
+    });
+  }
+
+  const targetPath = "README.md";
+  const safetyCheck = isPathSafe(targetPath);
+
+  if (!safetyCheck.safe) {
+    return res.status(400).json({
+      success: false,
+      action: "write_rejected",
+      reason: safetyCheck.reason
+    });
+  }
+
+  let existingContent = null;
+  let fileExists = false;
+
+  try {
+    existingContent = fs.readFileSync(safetyCheck.resolvedPath, "utf-8");
+    fileExists = true;
+  } catch (err) {
+    fileExists = false;
+  }
+
+  try {
+    const rawGenerated = await generateDocumentation({ fullIndex });
+    const cleanedContent = stripCodeFences(rawGenerated);
+
+    return res.json({
+      success: true,
+      action: "propose_write",
+      mode: fileExists ? "edit" : "write",
+      targetPath,
+      resolvedPath: safetyCheck.resolvedPath,
+      fileExists,
+      before: fileExists ? existingContent : "",
+      after: cleanedContent,
+      isDocumentation: true
+    });
+  } catch (err) {
+    console.error("Documentation generation failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      action: "generation_failed",
+      reason: err.message
+    });
+  }
+}
+
 app.post("/api/chat", async (req, res) => {
   const { prompt, history } = req.body;
 
@@ -246,6 +304,11 @@ app.post("/api/chat", async (req, res) => {
   const fixCommand = parseFixCommand(prompt);
   if (fixCommand.isFixCommand) {
     return handleFixCommand(fixCommand, res);
+  }
+
+  const documentCommand = parseDocumentCommand(prompt);
+  if (documentCommand.isDocumentCommand) {
+    return handleDocumentCommand(res);
   }
 
   const fullPrompt = buildFullPrompt(prompt, history);
