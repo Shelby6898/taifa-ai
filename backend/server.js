@@ -7,13 +7,15 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan } = require("./generateFileContent");
 const { stripCodeFences } = require("./stripCodeFences");
 const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { parseDocumentCommand } = require("./documentCommandParser");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
+const { parsePlanCommand } = require("./planCommandParser");
+const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId } = require("./planState");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 
 const app = express();
@@ -270,6 +272,77 @@ async function handleDocumentCommand(res) {
   }
 }
 
+async function handlePlanCommand(planCommand, res) {
+  if (planCommand.malformed) {
+    return res.status(400).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "No description provided. Use: plan: <description of what you want built>"
+    });
+  }
+
+  if (hasPendingPlan()) {
+    return res.status(409).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "A plan is already pending review. Approve or reject it before starting a new one."
+    });
+  }
+
+  const fullIndex = formatFullIndex();
+
+  try {
+    const rawPlan = await generatePlan({ description: planCommand.description, fullIndex });
+    const cleanedPlan = stripCodeFences(rawPlan);
+
+    let parsedFiles;
+    try {
+      parsedFiles = JSON.parse(cleanedPlan);
+    } catch (parseErr) {
+      return res.status(500).json({
+        success: false,
+        action: "plan_rejected",
+        reason: "Could not parse the generated plan as valid JSON. Try rephrasing your request."
+      });
+    }
+
+    if (!Array.isArray(parsedFiles) || parsedFiles.length === 0) {
+      return res.status(500).json({
+        success: false,
+        action: "plan_rejected",
+        reason: "The generated plan did not contain any files."
+      });
+    }
+
+    const MAX_PLAN_FILES = 5;
+    let truncatedFiles = null;
+
+    if (parsedFiles.length > MAX_PLAN_FILES) {
+      truncatedFiles = parsedFiles.slice(MAX_PLAN_FILES).map((f) => f.path);
+      parsedFiles = parsedFiles.slice(0, MAX_PLAN_FILES);
+    }
+
+    const plan = createPlan({ description: planCommand.description, files: parsedFiles });
+
+    return res.json({
+      success: true,
+      action: "plan_proposed",
+      planId: plan.id,
+      description: plan.description,
+      files: plan.files,
+      truncated: truncatedFiles !== null,
+      truncatedFiles
+    });
+  } catch (err) {
+    console.error("Plan generation failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      action: "generation_failed",
+      reason: err.message
+    });
+  }
+}
+
 app.post("/api/chat", async (req, res) => {
   const { prompt, history } = req.body;
 
@@ -309,6 +382,11 @@ app.post("/api/chat", async (req, res) => {
   const documentCommand = parseDocumentCommand(prompt);
   if (documentCommand.isDocumentCommand) {
     return handleDocumentCommand(res);
+  }
+
+  const planCommand = parsePlanCommand(prompt);
+  if (planCommand.isPlanCommand) {
+    return handlePlanCommand(planCommand, res);
   }
 
   const fullPrompt = buildFullPrompt(prompt, history);
@@ -397,6 +475,162 @@ app.post("/api/write", (req, res) => {
     console.error("[api/write] Write failed:", err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+app.get("/api/plan/current", (req, res) => {
+  const plan = getPendingPlan();
+  if (!plan) {
+    return res.json({ success: false, reason: "No pending plan" });
+  }
+  return res.json({ success: true, plan });
+});
+
+app.post("/api/plan/reject", (req, res) => {
+  const { planId } = req.body;
+
+  if (!isValidPlanId(planId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending plan to reject." });
+  }
+
+  clearPlan();
+  return res.json({ success: true, action: "plan_cleared" });
+});
+
+app.post("/api/plan/approve", async (req, res) => {
+  const { planId } = req.body;
+
+  if (!isValidPlanId(planId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending plan to approve." });
+  }
+
+  const plan = getPendingPlan();
+
+  if (plan.stage !== "plan_proposed") {
+    return res.status(400).json({
+      success: false,
+      reason: "Plan is not in the proposal stage. Current stage: " + plan.stage
+    });
+  }
+
+  try {
+    const enrichedFiles = [];
+
+    for (const file of plan.files) {
+      const safetyCheck = isPathSafe(file.path);
+
+      if (!safetyCheck.safe) {
+        return res.status(400).json({
+          success: false,
+          action: "plan_rejected",
+          reason: "Path safety check failed for " + file.path + ": " + safetyCheck.reason
+        });
+      }
+
+      let existingContent = null;
+      let fileExists = false;
+
+      try {
+        existingContent = fs.readFileSync(safetyCheck.resolvedPath, "utf-8");
+        fileExists = true;
+      } catch (err) {
+        fileExists = false;
+      }
+
+      const rawGenerated = await generateFileContent({
+        mode: fileExists ? "edit" : "write",
+        targetPath: file.path,
+        instruction: file.description,
+        existingContent: fileExists ? existingContent : null
+      });
+
+      const cleanedContent = stripCodeFences(rawGenerated);
+
+      enrichedFiles.push({
+        path: file.path,
+        description: file.description,
+        before: fileExists ? existingContent : "",
+        after: cleanedContent,
+        mode: fileExists ? "edit" : "write"
+      });
+    }
+
+    const enrichResult = enrichWithDiffs(planId, enrichedFiles);
+
+    if (!enrichResult.success) {
+      return res.status(400).json({ success: false, reason: enrichResult.reason });
+    }
+
+    return res.json({
+      success: true,
+      action: "diffs_proposed",
+      planId,
+      files: enrichedFiles
+    });
+  } catch (err) {
+    console.error("Plan approval failed:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/plan/apply", async (req, res) => {
+  const { planId } = req.body;
+
+  if (!isValidPlanId(planId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending plan to apply." });
+  }
+
+  const plan = getPendingPlan();
+
+  if (plan.stage !== "diffs_proposed") {
+    return res.status(400).json({
+      success: false,
+      reason: "Plan diffs have not been approved yet. Current stage: " + plan.stage
+    });
+  }
+
+  const results = [];
+
+  for (const file of plan.files) {
+    const safetyCheck = isPathSafe(file.path);
+
+    if (!safetyCheck.safe) {
+      return res.status(400).json({
+        success: false,
+        action: "apply_halted",
+        reason: "Path safety check failed for " + file.path + ": " + safetyCheck.reason,
+        filesWritten: results
+      });
+    }
+
+    try {
+      const backupPath = backupExistingFile(safetyCheck.resolvedPath, file.path);
+      fs.mkdirSync(path.dirname(safetyCheck.resolvedPath), { recursive: true });
+      fs.writeFileSync(safetyCheck.resolvedPath, file.after, "utf-8");
+
+      console.log("[api/plan/apply] Wrote " + file.after.length + " bytes to " + file.path);
+
+      results.push({
+        path: file.path,
+        bytesWritten: file.after.length,
+        backupCreated: backupPath !== null
+      });
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        action: "apply_halted",
+        reason: "Write failed for " + file.path + ": " + err.message,
+        filesWritten: results
+      });
+    }
+  }
+
+  clearPlan();
+
+  return res.json({
+    success: true,
+    action: "plan_applied",
+    filesWritten: results
+  });
 });
 
 app.get("/api/files", (req, res) => {

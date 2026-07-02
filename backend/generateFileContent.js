@@ -60,6 +60,27 @@ Write the README in Markdown format, including: a brief project title/descriptio
 Output ONLY the README content in Markdown. Do not wrap it in code fences. Do not include any meta-commentary about this being a generated document.`;
 }
 
+function buildPlanPrompt({ description, fullIndex }) {
+  return `You are planning a multi-file code change for an existing project. You do NOT write any code yet — you only decide which files need to be created or modified.
+
+Existing project files:
+${fullIndex || "(workspace is currently empty)"}
+
+The user wants: ${description}
+
+Produce a plan as a JSON array. Each item must have exactly two fields:
+- "path": a relative file path (e.g. "backend/routes/userRoutes.js")
+- "description": one short sentence describing what this file should contain or how it should change
+
+Rules:
+- Propose at most 5 files. If the task genuinely needs more than 5, only include the first 5 most essential files and nothing else.
+- Reuse existing file paths from the project files shown above when the task means modifying something that already exists, rather than proposing a duplicate new file.
+- Do not propose files unrelated to the user's request.
+
+Output ONLY the raw JSON array. Do not wrap it in markdown code fences. Do not include any explanation before or after the JSON. Example format:
+[{"path": "backend/example.js", "description": "Adds an example function"}]`;
+}
+
 async function generateFileContent(params) {
   const prompt = buildGenerationPrompt(params);
 
@@ -96,11 +117,25 @@ async function generateDocumentation(params) {
   return response.data.response;
 }
 
+async function generatePlan(params) {
+  const prompt = buildPlanPrompt(params);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false
+  });
+
+  return response.data.response;
+}
+
 module.exports = {
   generateFileContent,
   generateFix,
   generateDocumentation,
+  generatePlan,
   buildGenerationPrompt,
   buildFixPrompt,
-  buildDocumentationPrompt
+  buildDocumentationPrompt,
+  buildPlanPrompt
 };
