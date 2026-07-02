@@ -2,7 +2,8 @@
 const userSchema = {
   email: String,
   password: String,
-  role: String
+  role: String,
+  // Additional fields for user registration can be added here
 };
 
 module.exports = userSchema;
