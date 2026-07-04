@@ -21,7 +21,7 @@ const { addFact, formatMemoryBlock } = require("./projectMemory");
 const app = express();
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
-const MODEL_NAME = "qwen2.5-coder:1.5b";
+const MODEL_NAME = "qwen2.5-coder-6k";
 const MAX_HISTORY_TURNS = 3;
 
 app.use(cors());
@@ -289,7 +289,7 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
-  const fullIndex = formatFullIndex();
+  const fullIndex = formatFullIndex(planCommand.description);
 
   try {
     const rawPlan = await generatePlan({ description: planCommand.description, fullIndex });
