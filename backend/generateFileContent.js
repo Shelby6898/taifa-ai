@@ -1,7 +1,7 @@
 const axios = require("axios");
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
-const MODEL_NAME = "qwen2.5-coder:1.5b";
+const MODEL_NAME = "qwen2.5-coder-6k";
 
 function buildGenerationPrompt({ mode, targetPath, instruction, existingContent }) {
   if (mode === "edit" && existingContent) {
@@ -60,12 +60,16 @@ Write the README in Markdown format, including: a brief project title/descriptio
 Output ONLY the README content in Markdown. Do not wrap it in code fences. Do not include any meta-commentary about this being a generated document.`;
 }
 
-function buildPlanPrompt({ description, fullIndex }) {
+function buildPlanPrompt({ description, fullIndex, completedFiles }) {
+  const completedSection = completedFiles && completedFiles.length > 0
+    ? `\nThis is a continuation of a larger task. The following files have ALREADY been completed in previous batches — do not recreate or re-propose them unless a further change to one of them is genuinely still needed:\n${completedFiles.map((f) => `- ${f}`).join("\n")}\n\nIf the task described below is now fully accomplished by the files already completed, output an empty JSON array: []\n`
+    : "";
+
   return `You are planning a multi-file code change for an existing project. You do NOT write any code yet — you only decide which files need to be created or modified.
 
 Existing project files:
 ${fullIndex || "(workspace is currently empty)"}
-
+${completedSection}
 The user wants: ${description}
 
 Produce a plan as a JSON array. Each item must have exactly two fields:
@@ -73,7 +77,8 @@ Produce a plan as a JSON array. Each item must have exactly two fields:
 - "description": one short sentence describing what this file should contain or how it should change
 
 Rules:
-- Propose at most 5 files. If the task genuinely needs more than 5, only include the first 5 most essential files and nothing else.
+- List ALL files this task genuinely needs to be complete, in priority order (most essential first). Do not artificially limit yourself to a small number — if the task needs 12 files, list all 12. A separate system will handle splitting this into batches, so your only job here is to think through the complete, real scope of the task.
+- As a sanity bound, do not exceed 20 files even for a very large task — pick the 20 most essential if it seems larger than that.
 - Reuse existing file paths from the project files shown above when the task means modifying something that already exists, rather than proposing a duplicate new file.
 - Do not propose files unrelated to the user's request.
 

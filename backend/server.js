@@ -15,13 +15,49 @@ const { parseDocumentCommand } = require("./documentCommandParser");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
-const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId } = require("./planState");
+const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 
 const app = express();
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
 const MODEL_NAME = "qwen2.5-coder-6k";
+
+function syncReindexWorkspace() {
+  buildIndex();
+  const { buildImportGraph } = require("./importGraphBuilder");
+  buildImportGraph();
+  const { buildFunctionIndex } = require("./functionIndexBuilder");
+  buildFunctionIndex();
+  const { buildComponentGraph } = require("./componentGraphBuilder");
+  buildComponentGraph();
+  const { buildDbSchemaGraph } = require("./dbSchemaBuilder");
+  buildDbSchemaGraph();
+}
+
+async function generateBatchPlan({ description, completedFiles }) {
+  const MAX_PLAN_FILES = 5;
+  const fullIndex = formatFullIndex(description);
+  const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
+  const cleanedPlan = stripCodeFences(rawPlan);
+  const parsedFiles = JSON.parse(cleanedPlan);
+
+  if (!Array.isArray(parsedFiles)) {
+    throw new Error("Generated plan was not a JSON array");
+  }
+
+  let droppedFiles = null;
+  let files = parsedFiles;
+
+  if (files.length > MAX_PLAN_FILES) {
+    droppedFiles = files.slice(MAX_PLAN_FILES);
+    files = files.slice(0, MAX_PLAN_FILES);
+  }
+
+  const truncatedFiles = droppedFiles ? droppedFiles.map((f) => f.path) : null;
+
+  return { files, truncated: droppedFiles !== null, truncatedFiles, droppedFiles };
+}
 const MAX_HISTORY_TURNS = 3;
 
 app.use(cors());
@@ -301,22 +337,20 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
-  const fullIndex = formatFullIndex(planCommand.description);
+  if (hasActiveCampaign()) {
+    const campaign = getActiveCampaign();
+    return res.status(409).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "A multi-batch task is already in progress (batch " + campaign.batchNumber + "). Approve or reject the current batch before starting something new."
+    });
+  }
 
   try {
-    const rawPlan = await generatePlan({ description: planCommand.description, fullIndex });
-    const cleanedPlan = stripCodeFences(rawPlan);
-
-    let parsedFiles;
-    try {
-      parsedFiles = JSON.parse(cleanedPlan);
-    } catch (parseErr) {
-      return res.status(500).json({
-        success: false,
-        action: "plan_rejected",
-        reason: "Could not parse the generated plan as valid JSON. Try rephrasing your request."
-      });
-    }
+    const { files: parsedFiles, truncated, truncatedFiles, droppedFiles } = await generateBatchPlan({
+      description: planCommand.description,
+      completedFiles: []
+    });
 
     if (!Array.isArray(parsedFiles) || parsedFiles.length === 0) {
       return res.status(500).json({
@@ -326,12 +360,10 @@ async function handlePlanCommand(planCommand, res) {
       });
     }
 
-    const MAX_PLAN_FILES = 5;
-    let truncatedFiles = null;
-
-    if (parsedFiles.length > MAX_PLAN_FILES) {
-      truncatedFiles = parsedFiles.slice(MAX_PLAN_FILES).map((f) => f.path);
-      parsedFiles = parsedFiles.slice(0, MAX_PLAN_FILES);
+    let campaignInfo = null;
+    if (truncated) {
+      const campaign = startCampaign({ description: planCommand.description, remainingFiles: droppedFiles });
+      campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
     }
 
     const plan = createPlan({ description: planCommand.description, files: parsedFiles });
@@ -342,8 +374,9 @@ async function handlePlanCommand(planCommand, res) {
       planId: plan.id,
       description: plan.description,
       files: plan.files,
-      truncated: truncatedFiles !== null,
-      truncatedFiles
+      truncated,
+      truncatedFiles,
+      campaign: campaignInfo
     });
   } catch (err) {
     console.error("Plan generation failed:", err.message);
@@ -505,7 +538,14 @@ app.post("/api/plan/reject", (req, res) => {
   }
 
   clearPlan();
-  return res.json({ success: true, action: "plan_cleared" });
+
+  let campaignCleared = false;
+  if (hasActiveCampaign()) {
+    clearCampaign();
+    campaignCleared = true;
+  }
+
+  return res.json({ success: true, action: "plan_cleared", campaignCleared });
 });
 
 app.post("/api/plan/approve", async (req, res) => {
@@ -642,13 +682,63 @@ app.post("/api/plan/apply", async (req, res) => {
     }
   }
 
+  const appliedPaths = results.map((r) => r.path);
   clearPlan();
 
-  return res.json({
-    success: true,
-    action: "plan_applied",
-    filesWritten: results
-  });
+  if (!hasActiveCampaign()) {
+    return res.json({
+      success: true,
+      action: "plan_applied",
+      filesWritten: results
+    });
+  }
+
+  const campaignBefore = getActiveCampaign();
+  recordBatchCompletion(campaignBefore.id, appliedPaths);
+
+  try {
+    syncReindexWorkspace();
+
+    const MAX_PLAN_FILES = 5;
+    const campaign = getActiveCampaign();
+    const { files: nextFiles, remainingCount } = takeNextBatch(campaign.id, MAX_PLAN_FILES);
+
+    if (!Array.isArray(nextFiles) || nextFiles.length === 0) {
+      const finishedCampaign = campaign;
+      clearCampaign();
+      return res.json({
+        success: true,
+        action: "plan_applied",
+        filesWritten: results,
+        campaignComplete: true,
+        totalBatches: finishedCampaign.batchNumber - 1
+      });
+    }
+
+    const nextPlan = createPlan({ description: campaign.description, files: nextFiles });
+
+    return res.json({
+      success: true,
+      action: "plan_applied",
+      filesWritten: results,
+      nextBatch: {
+        planId: nextPlan.id,
+        batchNumber: campaign.batchNumber,
+        description: nextPlan.description,
+        files: nextPlan.files,
+        remainingAfterThisBatch: remainingCount
+      }
+    });
+  } catch (err) {
+    console.error("Batch continuation failed:", err.message);
+    clearCampaign();
+    return res.json({
+      success: true,
+      action: "plan_applied",
+      filesWritten: results,
+      campaignError: "Could not continue to the next batch automatically: " + err.message
+    });
+  }
 });
 
 app.get("/api/files", (req, res) => {
