@@ -1,13 +1,22 @@
-# User Authentication Application
+# Simple Auth Server
 
-This project is a simple user authentication application built with Node.js and Express, using JWT for token generation. The application handles user registration and login functionalities. It includes a front-end component in React for form interactions.
+## Description
 
-## Project Structure
+This is a simple authentication server built using Express.js with JWT tokens for user authentication and management. It includes routes for user registration, login, and token generation.
 
-- **backend/controllers/authController.js**: Handles the login, registration, and JWT token generation.
-  - `login`: Verifies credentials, generates a JWT token.
-- **backend/models/User.js**: Defines the User model schema with fields like email, password, and role.
-- **frontend/src/pages/Login.jsx**: Contains the Login form in React.
+## Project Files
+
+- `backend/controllers/authController.js`: Handles user authentication, including login and token generation.
+  - Imports: `jsonwebtoken` [external]
+  - Schema: `userSchema` in `backend/models/User.js`
+  
+- `backend/models/User.js`: Defines the structure of a user with fields like `email`, `password`, and `role`.
+  
+- `backend/routes/userRoutes.js`: Handles HTTP requests for creating users and authenticating users.
+  
+- `frontend/src/pages/Login.jsx`: A component for logging in users, using the `/login` route to send credentials.
+  
+- `frontend/src/pages/Register.jsx`: A component for registering new users, using the `/register` route to send user details.
 
 ## Dependencies
 

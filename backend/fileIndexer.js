@@ -77,9 +77,10 @@ function scoreFile(query, file) {
   return score;
 }
 
-function searchIndex(query, topN = 3) {
+function searchIndex(query, topN = 3, excludeExtensions = []) {
   const index = loadIndex();
-  const scored = index
+  const filteredIndex = index.filter((f) => !excludeExtensions.some((ext) => f.path.toLowerCase().endsWith(ext)));
+  const scored = filteredIndex
     .map((file) => ({ ...file, score: scoreFile(query, file) }))
     .filter((file) => file.score > 0)
     .sort((a, b) => b.score - a.score);

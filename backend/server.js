@@ -112,6 +112,10 @@ async function handleWriteCommand(parsedCommand, res) {
     });
 
     const cleanedContent = stripCodeFences(rawGenerated);
+    const { checkSyntax } = require("./syntaxChecker");
+    const syntaxResult = checkSyntax(cleanedContent);
+    const { checkImports } = require("./importChecker");
+    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
 
     return res.json({
       success: true,
@@ -121,7 +125,9 @@ async function handleWriteCommand(parsedCommand, res) {
       resolvedPath: safetyCheck.resolvedPath,
       fileExists,
       before: fileExists ? existingContent : "",
-      after: cleanedContent
+      after: cleanedContent,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
     });
   } catch (err) {
     console.error("Content generation failed:", err.message);
@@ -149,7 +155,7 @@ async function handleFixCommand(fixCommand, res) {
   let locationMethod = "stack_trace";
 
   if (!relativePath) {
-    const matches = searchIndex(errorText, 1);
+    const matches = searchIndex(errorText, 1, [".md"]);
     if (matches.length > 0) {
       relativePath = matches[0].path;
       locationMethod = "keyword_search";
@@ -193,6 +199,10 @@ async function handleFixCommand(fixCommand, res) {
     });
 
     const cleanedContent = stripCodeFences(rawGenerated);
+    const { checkSyntax } = require("./syntaxChecker");
+    const syntaxResult = checkSyntax(cleanedContent);
+    const { checkImports } = require("./importChecker");
+    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
 
     return res.json({
       success: true,
@@ -203,6 +213,8 @@ async function handleFixCommand(fixCommand, res) {
       fileExists: true,
       before: existingContent,
       after: cleanedContent,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
       locationMethod
     });
   } catch (err) {
@@ -544,12 +556,18 @@ app.post("/api/plan/approve", async (req, res) => {
       });
 
       const cleanedContent = stripCodeFences(rawGenerated);
+    const { checkSyntax } = require("./syntaxChecker");
+    const syntaxResult = checkSyntax(cleanedContent);
+    const { checkImports } = require("./importChecker");
+    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
 
       enrichedFiles.push({
         path: file.path,
         description: file.description,
         before: fileExists ? existingContent : "",
         after: cleanedContent,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
         mode: fileExists ? "edit" : "write"
       });
     }

@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@babel/parser": "^8.0.0",
     "axios": "^1.18.1",
     "chokidar": "^5.0.0",
     "cors": "^2.8.6",
