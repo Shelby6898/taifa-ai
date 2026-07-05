@@ -64,6 +64,22 @@ function Chat() {
             ...prev,
             { role: "assistant", content: `Couldn't remember that: ${data.reason}` }
           ]);
+        } else if (data.action === "tests_ran") {
+          const statusLine = data.passed ? "✅ Tests passed" : "❌ Tests failed";
+          const timeoutNote = data.timedOut ? " (timed out)" : "";
+          const output = [data.stdout, data.stderr].filter(Boolean).join("\n");
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `${statusLine}${timeoutNote} — ran in ${data.projectDir}\n\n${output}`
+            }
+          ]);
+        } else if (data.action === "tests_not_found") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: data.message }
+          ]);
         } else {
           setMessages((prev) => [
             ...prev,

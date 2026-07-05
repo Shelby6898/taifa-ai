@@ -12,6 +12,8 @@ const { stripCodeFences } = require("./stripCodeFences");
 const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { parseDocumentCommand } = require("./documentCommandParser");
+const { parseTestCommand } = require("./testCommandParser");
+const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
@@ -320,6 +322,37 @@ async function handleDocumentCommand(res) {
   }
 }
 
+async function handleRunTestsCommand(res) {
+  try {
+    const result = await runTests();
+
+    if (!result.success) {
+      return res.json({
+        success: true,
+        action: "tests_not_found",
+        message: result.reason
+      });
+    }
+
+    return res.json({
+      success: true,
+      action: "tests_ran",
+      projectDir: result.projectDir,
+      passed: !result.exitedWithError,
+      timedOut: result.timedOut === true,
+      stdout: result.stdout,
+      stderr: result.stderr
+    });
+  } catch (err) {
+    console.error("Test execution failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      action: "test_execution_failed",
+      reason: err.message
+    });
+  }
+}
+
 async function handlePlanCommand(planCommand, res) {
   if (planCommand.malformed) {
     return res.status(400).json({
@@ -427,6 +460,11 @@ app.post("/api/chat", async (req, res) => {
   const documentCommand = parseDocumentCommand(prompt);
   if (documentCommand.isDocumentCommand) {
     return handleDocumentCommand(res);
+  }
+
+  const testCommand = parseTestCommand(prompt);
+  if (testCommand.isTestCommand) {
+    return handleRunTestsCommand(res);
   }
 
   const planCommand = parsePlanCommand(prompt);
