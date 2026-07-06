@@ -20,4 +20,5 @@ This is a simple authentication server built using Express.js with JWT tokens fo
 
 ## Dependencies
 
-No external dependencies found in the files shown.
+No external dependencies found in the files shown.// test comment for git tool
+// small test edit

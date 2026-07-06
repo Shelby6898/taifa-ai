@@ -5,5 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test src/utils/*.test.js"
+  },
+  "dependencies": {
+    "lodash": "^4.18.1"
   }
 }

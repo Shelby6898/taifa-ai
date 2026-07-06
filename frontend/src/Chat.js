@@ -9,6 +9,8 @@ function Chat() {
   const [writeStatus, setWriteStatus] = useState("");
   const [pendingPlan, setPendingPlan] = useState(null);
   const [pendingDiffs, setPendingDiffs] = useState(null);
+  const [pendingToolAction, setPendingToolAction] = useState(null);
+  const [toolActionStatus, setToolActionStatus] = useState("");
   const [planStatus, setPlanStatus] = useState("");
   const isSendingRef = useRef(false);
 
@@ -79,6 +81,30 @@ function Chat() {
           setMessages((prev) => [
             ...prev,
             { role: "assistant", content: data.message }
+          ]);
+        } else if (data.action === "git_status" || data.action === "git_diff") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: data.stdout + (data.stderr ? "\n" + data.stderr : "") }
+          ]);
+        } else if (data.action === "git_commit_refused") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `🚫 ${data.message}` }
+          ]);
+        } else if (data.action === "git_not_repo" || data.action === "git_nothing_to_commit") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: data.message }
+          ]);
+        } else if (data.action === "commit_proposed") {
+          setPendingToolAction({ type: "commit", actionId: data.actionId, message: data.message, diffPreview: data.diffPreview });
+        } else if (data.action === "install_proposed") {
+          setPendingToolAction({ type: "install", actionId: data.actionId, packageName: data.packageName });
+        } else if (data.action === "action_rejected") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Action rejected: ${data.reason}` }
           ]);
         } else {
           setMessages((prev) => [
@@ -215,6 +241,51 @@ function Chat() {
     }
   };
 
+  const approveToolAction = async () => {
+    if (!pendingToolAction) return;
+    setToolActionStatus("Running...");
+
+    try {
+      const response = await fetch("http://localhost:5000/api/tool-action/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionId: pendingToolAction.actionId })
+      });
+
+      const result = await response.json();
+      setPendingToolAction(null);
+
+      const summary =
+        result.action === "commit_applied" ? `✅ Committed:\n${result.stdout}` :
+        result.action === "commit_failed" ? `❌ Commit failed: ${result.reason}` :
+        result.action === "install_applied" ? `✅ Installed in ${result.projectDir}:\n${result.stdout}` :
+        result.action === "install_failed" ? `❌ Install failed: ${result.reason}` :
+        `Action result: ${JSON.stringify(result)}`;
+
+      setMessages((prev) => [...prev, { role: "assistant", content: summary }]);
+      setToolActionStatus("");
+    } catch (err) {
+      setToolActionStatus(`Action failed: ${err.message}`);
+    }
+  };
+
+  const rejectToolAction = async () => {
+    if (!pendingToolAction) return;
+
+    try {
+      await fetch("http://localhost:5000/api/tool-action/reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionId: pendingToolAction.actionId })
+      });
+    } catch (err) {
+      console.error("Reject tool action failed:", err);
+    } finally {
+      setPendingToolAction(null);
+      setMessages((prev) => [...prev, { role: "assistant", content: "Action rejected — nothing was run." }]);
+    }
+  };
+
   const applyPlan = async () => {
     if (!pendingDiffs) return;
     setPlanStatus("Applying all files...");
@@ -345,6 +416,36 @@ function Chat() {
             </button>
             <button onClick={rejectPlan} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
               Reject Plan
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pendingToolAction && (
+        <div style={{ border: "2px solid #6f42c1", borderRadius: 8, padding: 12, marginBottom: 16, background: "#f6f0ff" }}>
+          {pendingToolAction.type === "commit" ? (
+            <>
+              <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
+                💾 Proposed commit: "{pendingToolAction.message}"
+              </p>
+              <pre style={{ fontSize: 11, background: "#fff", padding: 8, borderRadius: 4, overflowX: "auto", maxHeight: 200 }}>
+                {pendingToolAction.diffPreview}
+              </pre>
+            </>
+          ) : (
+            <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
+              📦 About to run: npm install {pendingToolAction.packageName}
+            </p>
+          )}
+          {toolActionStatus && (
+            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#555" }}>{toolActionStatus}</p>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={approveToolAction} style={{ background: "#6f42c1", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
+              Approve
+            </button>
+            <button onClick={rejectToolAction} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
+              Reject
             </button>
           </div>
         </div>

@@ -13,6 +13,11 @@ const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { parseDocumentCommand } = require("./documentCommandParser");
 const { parseTestCommand } = require("./testCommandParser");
+const { parseGitCommand } = require("./gitCommandParser");
+const { parseInstallCommand } = require("./installCommandParser");
+const { isGitRepo, getStatus, getDiff, commitChanges, detectRiskyPaths } = require("./gitTool");
+const { installPackage } = require("./packageManagerTool");
+const { hasPendingAction, getPendingAction, createPendingAction, isValidActionId, clearPendingAction } = require("./toolActionState");
 const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
@@ -353,6 +358,181 @@ async function handleRunTestsCommand(res) {
   }
 }
 
+async function handleGitStatusCommand(res) {
+  const result = await getStatus();
+
+  if (!result.success && result.reason) {
+    return res.json({ success: true, action: "git_not_repo", message: result.reason });
+  }
+
+  return res.json({
+    success: true,
+    action: "git_status",
+    stdout: result.stdout || "(no changes)",
+    stderr: result.stderr
+  });
+}
+
+async function handleGitDiffCommand(res) {
+  const result = await getDiff();
+
+  if (!result.success && result.reason) {
+    return res.json({ success: true, action: "git_not_repo", message: result.reason });
+  }
+
+  return res.json({
+    success: true,
+    action: "git_diff",
+    stdout: result.stdout || "(no differences)",
+    stderr: result.stderr
+  });
+}
+
+async function handleGitCommitCommand(res) {
+  if (!isGitRepo()) {
+    return res.json({ success: true, action: "git_not_repo", message: "The workspace is not a git repository." });
+  }
+
+  if (hasPendingAction()) {
+    return res.status(409).json({
+      success: false,
+      action: "action_rejected",
+      reason: "Another action is already pending approval. Approve or reject it first."
+    });
+  }
+
+  const diffResult = await getDiff();
+  const diffText = diffResult.stdout || "";
+
+  if (!diffText.trim()) {
+    return res.json({ success: true, action: "git_nothing_to_commit", message: "No uncommitted changes found." });
+  }
+
+  const statusResult = await getStatus();
+  const riskyPaths = detectRiskyPaths(statusResult.stdout || "");
+
+  if (riskyPaths.length > 0) {
+    return res.json({
+      success: true,
+      action: "git_commit_refused",
+      message: "Refusing to propose a commit — the change includes what looks like generated/vendor content (" + riskyPaths.join(", ") + "). This is usually node_modules or build output that shouldn't be committed. Add it to .gitignore and clean up the git index before committing."
+    });
+  }
+
+  try {
+    const truncatedDiff = diffText.length > 3000 ? diffText.slice(0, 3000) + "\n[diff truncated]" : diffText;
+    const prompt = "Write a single concise git commit message (one line, under 72 characters, no quotes, no prefix like \"feat:\" unless genuinely appropriate) summarizing this diff:\n\n" + truncatedDiff + "\n\nOutput ONLY the commit message text, nothing else.";
+
+    const response = await axios.post(OLLAMA_URL + "/api/generate", {
+      model: MODEL_NAME,
+      prompt,
+      stream: false
+    });
+
+    const cleanedResponse = stripCodeFences(response.data.response);
+    const suggestedMessage = cleanedResponse.trim().split("\n").filter((line) => line.trim().length > 0)[0].replace(/^`+|`+$/g, "").trim().slice(0, 200);
+
+    const action = createPendingAction({
+      type: "git_commit",
+      payload: { message: suggestedMessage, diffPreview: truncatedDiff }
+    });
+
+    return res.json({
+      success: true,
+      action: "commit_proposed",
+      actionId: action.id,
+      message: suggestedMessage,
+      diffPreview: truncatedDiff
+    });
+  } catch (err) {
+    console.error("Commit message generation failed:", err.message);
+    return res.status(500).json({ success: false, action: "generation_failed", reason: err.message });
+  }
+}
+
+async function handleInstallCommand(installCommand, res) {
+  if (hasPendingAction()) {
+    return res.status(409).json({
+      success: false,
+      action: "action_rejected",
+      reason: "Another action is already pending approval. Approve or reject it first."
+    });
+  }
+
+  const action = createPendingAction({
+    type: "install",
+    payload: { packageName: installCommand.packageName }
+  });
+
+  return res.json({
+    success: true,
+    action: "install_proposed",
+    actionId: action.id,
+    packageName: installCommand.packageName
+  });
+}
+
+app.post("/api/tool-action/approve", async (req, res) => {
+  const { actionId } = req.body;
+
+  if (!isValidActionId(actionId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending action to approve." });
+  }
+
+  const action = getPendingAction();
+
+  try {
+    if (action.type === "git_commit") {
+      const result = await commitChanges(action.payload.message);
+      clearPendingAction();
+
+      if (!result.success) {
+        return res.json({ success: true, action: "commit_failed", reason: result.reason });
+      }
+
+      return res.json({ success: true, action: "commit_applied", stdout: result.stdout });
+    }
+
+    if (action.type === "install") {
+      const result = await installPackage(action.payload.packageName);
+      clearPendingAction();
+
+      if (!result.success) {
+        return res.json({
+          success: true,
+          action: "install_failed",
+          reason: result.reason || result.stderr || result.errorMessage
+        });
+      }
+
+      return res.json({
+        success: true,
+        action: "install_applied",
+        projectDir: result.projectDir,
+        stdout: result.stdout
+      });
+    }
+
+    clearPendingAction();
+    return res.status(400).json({ success: false, reason: "Unknown pending action type." });
+  } catch (err) {
+    clearPendingAction();
+    console.error("Tool action execution failed:", err.message);
+    return res.status(500).json({ success: false, reason: err.message });
+  }
+});
+
+app.post("/api/tool-action/reject", (req, res) => {
+  const { actionId } = req.body;
+
+  if (!isValidActionId(actionId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending action to reject." });
+  }
+
+  clearPendingAction();
+  return res.json({ success: true, action: "action_cleared" });
+});
+
 async function handlePlanCommand(planCommand, res) {
   if (planCommand.malformed) {
     return res.status(400).json({
@@ -465,6 +645,22 @@ app.post("/api/chat", async (req, res) => {
   const testCommand = parseTestCommand(prompt);
   if (testCommand.isTestCommand) {
     return handleRunTestsCommand(res);
+  }
+
+  const gitCommand = parseGitCommand(prompt);
+  if (gitCommand.type === "status") {
+    return handleGitStatusCommand(res);
+  }
+  if (gitCommand.type === "diff") {
+    return handleGitDiffCommand(res);
+  }
+  if (gitCommand.type === "commit") {
+    return handleGitCommitCommand(res);
+  }
+
+  const installCommand = parseInstallCommand(prompt);
+  if (installCommand.isInstallCommand) {
+    return handleInstallCommand(installCommand, res);
   }
 
   const planCommand = parsePlanCommand(prompt);
