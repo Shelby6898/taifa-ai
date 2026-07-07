@@ -4,7 +4,7 @@ const { WORKSPACE_DIR } = require("./fileIndexer");
 
 const NODE_BUILTINS = new Set([
   "fs", "path", "http", "https", "crypto", "os", "url", "util",
-  "events", "stream", "child_process", "assert", "buffer", "querystring"
+  "events", "stream", "child_process", "assert", "buffer", "querystring", "test"
 ]);
 
 const RESOLVE_EXTENSIONS = [".js", ".jsx", ".ts", ".tsx"];
@@ -79,7 +79,8 @@ function checkImports(content, targetAbsPath) {
       return { specifier, type: "relative", status: exists ? "ok" : "missing" };
     }
 
-    if (NODE_BUILTINS.has(specifier)) {
+    const normalizedSpecifier = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
+    if (NODE_BUILTINS.has(normalizedSpecifier)) {
       return { specifier, type: "builtin", status: "ok" };
     }
 

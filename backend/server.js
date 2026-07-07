@@ -7,7 +7,9 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation, generatePlan } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile } = require("./generateFileContent");
+const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
+const { parseSelfReview } = require("./selfReviewParser");
 const { stripCodeFences } = require("./stripCodeFences");
 const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
@@ -159,6 +161,10 @@ async function handleWriteCommand(parsedCommand, res) {
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const { checkLint } = require("./lintChecker");
+    const lintResult = checkLint(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const selfReviewResult = parseSelfReview(rawSelfReview);
 
     return res.json({
       success: true,
@@ -171,9 +177,113 @@ async function handleWriteCommand(parsedCommand, res) {
       after: cleanedContent,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
+      lintCheck: lintResult,
+      selfReview: selfReviewResult,
     });
   } catch (err) {
     console.error("Content generation failed:", err.message);
+    return res.status(500).json({
+      success: false,
+      action: "generation_failed",
+      reason: err.message
+    });
+  }
+}
+
+async function handleWriteTestsCommand(targetPath, res) {
+  const sourceSafetyCheck = isPathSafe(targetPath);
+
+  if (!sourceSafetyCheck.safe) {
+    return res.status(400).json({
+      success: false,
+      action: "write_rejected",
+      reason: sourceSafetyCheck.reason,
+      attemptedPath: targetPath
+    });
+  }
+
+  let sourceContent;
+  try {
+    sourceContent = fs.readFileSync(sourceSafetyCheck.resolvedPath, "utf-8");
+  } catch (err) {
+    return res.status(400).json({
+      success: false,
+      action: "write_rejected",
+      reason: "Could not read " + targetPath + " — it may not exist: " + err.message
+    });
+  }
+
+  const testFilePath = targetPath.replace(/\.(js|jsx|ts|tsx)$/, ".test.$1");
+  const testSafetyCheck = isPathSafe(testFilePath);
+
+  if (!testSafetyCheck.safe) {
+    return res.status(400).json({
+      success: false,
+      action: "write_rejected",
+      reason: testSafetyCheck.reason,
+      attemptedPath: testFilePath
+    });
+  }
+
+  let existingTestContent = null;
+  let testFileExists = false;
+  try {
+    existingTestContent = fs.readFileSync(testSafetyCheck.resolvedPath, "utf-8");
+    testFileExists = true;
+  } catch (err) {
+    testFileExists = false;
+  }
+
+  try {
+    const { getModuleSystemForPath, detectModuleSystemMismatch } = require("./moduleSystemDetector");
+    const requiredModuleSystem = getModuleSystemForPath(testSafetyCheck.resolvedPath);
+
+    const rawGenerated = await generateTestFile({
+      sourceFilePath: targetPath,
+      sourceFileContent: sourceContent,
+      testFilePath,
+      existingTestContent: testFileExists ? existingTestContent : null,
+      moduleSystem: requiredModuleSystem
+    });
+
+    const cleanedContent = stripCodeFences(rawGenerated);
+
+    const moduleMismatch = detectModuleSystemMismatch(cleanedContent, requiredModuleSystem);
+
+    if (moduleMismatch.mismatch) {
+      return res.json({
+        success: true,
+        action: "test_generation_refused",
+        message: "Refusing to propose this generated test — " + moduleMismatch.reason
+      });
+    }
+
+    const { checkSyntax } = require("./syntaxChecker");
+    const syntaxResult = checkSyntax(cleanedContent);
+    const { checkImports } = require("./importChecker");
+    const importResult = checkImports(cleanedContent, testSafetyCheck.resolvedPath);
+    const { checkLint } = require("./lintChecker");
+    const lintResult = checkLint(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const selfReviewResult = parseSelfReview(rawSelfReview);
+
+    return res.json({
+      success: true,
+      action: "propose_write",
+      mode: testFileExists ? "edit" : "write",
+      targetPath: testFilePath,
+      resolvedPath: testSafetyCheck.resolvedPath,
+      fileExists: testFileExists,
+      before: testFileExists ? existingTestContent : "",
+      after: cleanedContent,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
+      lintCheck: lintResult,
+      selfReview: selfReviewResult,
+      isTestGeneration: true
+    });
+  } catch (err) {
+    console.error("Test generation failed:", err.message);
     return res.status(500).json({
       success: false,
       action: "generation_failed",
@@ -246,6 +356,10 @@ async function handleFixCommand(fixCommand, res) {
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const { checkLint } = require("./lintChecker");
+    const lintResult = checkLint(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const selfReviewResult = parseSelfReview(rawSelfReview);
 
     return res.json({
       success: true,
@@ -258,6 +372,8 @@ async function handleFixCommand(fixCommand, res) {
       after: cleanedContent,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
+      lintCheck: lintResult,
+      selfReview: selfReviewResult,
       locationMethod
     });
   } catch (err) {
@@ -663,6 +779,11 @@ app.post("/api/chat", async (req, res) => {
     return handleInstallCommand(installCommand, res);
   }
 
+  const testGenCommand = parseTestGenerationCommand(prompt);
+  if (testGenCommand.isTestGenerationCommand) {
+    return handleWriteTestsCommand(testGenCommand.targetPath, res);
+  }
+
   const planCommand = parsePlanCommand(prompt);
   if (planCommand.isPlanCommand) {
     return handlePlanCommand(planCommand, res);
@@ -834,6 +955,10 @@ app.post("/api/plan/approve", async (req, res) => {
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const { checkLint } = require("./lintChecker");
+    const lintResult = checkLint(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const selfReviewResult = parseSelfReview(rawSelfReview);
 
       enrichedFiles.push({
         path: file.path,
@@ -842,6 +967,8 @@ app.post("/api/plan/approve", async (req, res) => {
         after: cleanedContent,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
+      lintCheck: lintResult,
+      selfReview: selfReviewResult,
         mode: fileExists ? "edit" : "write"
       });
     }

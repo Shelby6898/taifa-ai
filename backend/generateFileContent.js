@@ -134,13 +134,89 @@ async function generatePlan(params) {
   return response.data.response;
 }
 
+function buildSelfReviewPrompt(code) {
+  return `You are reviewing a code snippet. Most code you review will be completely fine — only answer YES if there is a specific, concrete, undeniable bug such as a reference to an undefined variable, a misspelled identifier, or a clear logic error. Do not invent a problem that is not really there.
+
+Example 1:
+Code: function double(x) { return x * 2; }
+Answer: NO
+
+Example 2:
+Code: function greet(name) { return "Hello " + nam; }
+Answer: YES: "nam" is misspelled and should be "name", which will cause a ReferenceError.
+
+Now review this code:
+${code}
+
+Answer in exactly this format, nothing else:
+NO
+or
+YES: <one short sentence describing the specific problem>`;
+}
+
+async function generateSelfReview(code) {
+  const prompt = buildSelfReviewPrompt(code);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false
+  });
+
+  return response.data.response;
+}
+
+function buildTestGenerationPrompt({ sourceFilePath, sourceFileContent, testFilePath, existingTestContent, moduleSystem }) {
+  const editSection = existingTestContent
+    ? `There is already a test file at ${testFilePath} with this content, which you should update rather than replace with something unrelated:
+${existingTestContent}
+
+`
+    : "";
+
+  const moduleSystemInstruction = moduleSystem === "module"
+    ? `This project location uses ES modules (package.json has "type": "module"). You MUST use "import { test } from 'node:test';" and "import assert from 'node:assert';" at the top, and import the function being tested with ES import syntax (e.g. import { functionName } from './fileName.js';). Do NOT use require() anywhere in this file — require is not defined in this context and the file will crash immediately if you use it.`
+    : `This project location uses CommonJS. You MUST use require() for all imports (e.g. const { test } = require('node:test'); const assert = require('node:assert'); const { functionName } = require('./fileName');). Do NOT use import/export syntax anywhere in this file — it will cause a SyntaxError in this context.`;
+
+  return `Write a real, meaningful test file using Node's built-in test runner.
+
+${moduleSystemInstruction}
+
+The file being tested is at ${sourceFilePath}. Its ACTUAL current content is:
+${sourceFileContent}
+
+${editSection}Requirements:
+- Import the actual exported function(s) from "${sourceFilePath}" using the correct relative path and the SAME export style already used in that file (named export vs default export — look at the actual code above, do not guess).
+- Include at least one test case for clearly valid/expected input, and at least one test case for invalid or edge-case input.
+- Do NOT write placeholder or trivially-true assertions like assert(true) or tests that don't actually exercise the real function's logic.
+- Every assertion must test the ACTUAL behavior of the real code shown above, not assumed or invented behavior.
+
+Output ONLY the complete test file content. Do not include any explanation, introduction, or markdown code fences. Output raw code only, starting from the first line of the file.`;
+}
+
+async function generateTestFile(params) {
+  const prompt = buildTestGenerationPrompt(params);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false
+  });
+
+  return response.data.response;
+}
+
 module.exports = {
   generateFileContent,
   generateFix,
   generateDocumentation,
   generatePlan,
+  generateSelfReview,
+  generateTestFile,
   buildGenerationPrompt,
   buildFixPrompt,
   buildDocumentationPrompt,
-  buildPlanPrompt
+  buildPlanPrompt,
+  buildSelfReviewPrompt,
+  buildTestGenerationPrompt
 };

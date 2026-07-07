@@ -101,6 +101,11 @@ function Chat() {
           setPendingToolAction({ type: "commit", actionId: data.actionId, message: data.message, diffPreview: data.diffPreview });
         } else if (data.action === "install_proposed") {
           setPendingToolAction({ type: "install", actionId: data.actionId, packageName: data.packageName });
+        } else if (data.action === "test_generation_refused") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `🚫 ${data.message}` }
+          ]);
         } else if (data.action === "action_rejected") {
           setMessages((prev) => [
             ...prev,
