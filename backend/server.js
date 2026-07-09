@@ -9,6 +9,7 @@ const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
 const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile } = require("./generateFileContent");
 const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
+const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
 const { stripCodeFences } = require("./stripCodeFences");
 const { parseFixCommand } = require("./fixCommandParser");
@@ -717,6 +718,64 @@ async function handlePlanCommand(planCommand, res) {
   }
 }
 
+function handleExecutePlanCommand(executePlanCommand, res) {
+  if (executePlanCommand.malformed) {
+    return res.status(400).json({
+      success: false,
+      action: "plan_rejected",
+      reason: executePlanCommand.reason
+    });
+  }
+
+  if (hasPendingPlan()) {
+    return res.status(409).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "A plan is already pending review. Approve or reject it before starting a new one."
+    });
+  }
+
+  if (hasActiveCampaign()) {
+    const campaign = getActiveCampaign();
+    return res.status(409).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "A multi-batch task is already in progress (batch " + campaign.batchNumber + "). Approve or reject the current batch before starting something new."
+    });
+  }
+
+  const MAX_PLAN_FILES = 5;
+  let files = executePlanCommand.files;
+  let droppedFiles = null;
+  let truncated = false;
+
+  if (files.length > MAX_PLAN_FILES) {
+    droppedFiles = files.slice(MAX_PLAN_FILES);
+    files = files.slice(0, MAX_PLAN_FILES);
+    truncated = true;
+  }
+
+  let campaignInfo = null;
+  if (truncated) {
+    const campaign = startCampaign({ description: executePlanCommand.description, remainingFiles: droppedFiles });
+    campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
+  }
+
+  const plan = createPlan({ description: executePlanCommand.description, files });
+
+  return res.json({
+    success: true,
+    action: "plan_proposed",
+    planId: plan.id,
+    description: plan.description,
+    files: plan.files,
+    truncated,
+    truncatedFiles: droppedFiles ? droppedFiles.map((f) => f.path) : null,
+    campaign: campaignInfo,
+    isHumanSupplied: true
+  });
+}
+
 app.post("/api/chat", async (req, res) => {
   const { prompt, history } = req.body;
 
@@ -782,6 +841,11 @@ app.post("/api/chat", async (req, res) => {
   const testGenCommand = parseTestGenerationCommand(prompt);
   if (testGenCommand.isTestGenerationCommand) {
     return handleWriteTestsCommand(testGenCommand.targetPath, res);
+  }
+
+  const executePlanCommand = parseExecutePlanCommand(prompt);
+  if (executePlanCommand.isExecutePlanCommand) {
+    return handleExecutePlanCommand(executePlanCommand, res);
   }
 
   const planCommand = parsePlanCommand(prompt);
@@ -922,6 +986,16 @@ app.post("/api/plan/approve", async (req, res) => {
   try {
     const enrichedFiles = [];
 
+    // Precompute the resolved path of every file in this batch, so
+    // sibling files being created together (e.g. a new source file and
+    // its test) don't falsely fail import checking just because
+    // neither has been written to disk yet — the whole batch is one
+    // unit of work, not written until the human approves and applies it.
+    const batchSiblingPaths = plan.files
+      .map((f) => isPathSafe(f.path))
+      .filter((check) => check.safe)
+      .map((check) => check.resolvedPath);
+
     for (const file of plan.files) {
       const safetyCheck = isPathSafe(file.path);
 
@@ -954,7 +1028,7 @@ app.post("/api/plan/approve", async (req, res) => {
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
-    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath, batchSiblingPaths);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
     const rawSelfReview = await generateSelfReview(cleanedContent);

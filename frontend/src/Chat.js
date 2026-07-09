@@ -161,11 +161,10 @@ function Chat() {
     }
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      sendMessage();
-    }
+  const handleKeyDown = () => {
+    // On mobile there's no reliable Shift key, so Enter always inserts
+    // a newline (default textarea behavior, nothing to intercept here)
+    // and sending only happens via the Send button.
   };
 
   const approveWrite = async () => {
@@ -505,14 +504,15 @@ function Chat() {
       )}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <input
+        <textarea
           autoCapitalize="off"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={isStreaming}
-          placeholder="Ask something, or: plan: what to build"
-          style={{ flex: 1, padding: 8 }}
+          placeholder="Ask something, or: plan: what to build (Enter for new line, tap Send to submit)"
+          rows={1}
+          style={{ flex: 1, padding: 8, resize: "vertical", fontFamily: "inherit", fontSize: "inherit" }}
         />
         <button onClick={sendMessage} disabled={isStreaming}>
           {isStreaming ? "Thinking..." : "Send"}

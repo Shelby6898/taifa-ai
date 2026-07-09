@@ -39,6 +39,7 @@ function findPackageJson(startDir) {
   }
   return null;
 }
+
 function loadDeclaredDependencies(targetAbsDir) {
   const pkgPath = findPackageJson(targetAbsDir);
   if (!pkgPath) return null;
@@ -62,10 +63,19 @@ function loadDeclaredDependencies(targetAbsDir) {
 // targetAbsPath is where this generated content is intended to live —
 // used to resolve relative imports correctly even for a brand-new file
 // that doesn't exist on disk yet.
-function checkImports(content, targetAbsPath) {
+//
+// siblingAbsPaths (optional): absolute paths of OTHER files being
+// proposed in the same batch (e.g. a multi-file plan not yet applied).
+// Without this, a new file importing another new file from the same
+// batch would always be falsely flagged "missing", since neither file
+// exists on disk until the whole batch is actually applied. These
+// paths are treated as if they already exist, purely for resolution
+// purposes, alongside real on-disk files.
+function checkImports(content, targetAbsPath, siblingAbsPaths = []) {
   const specifiers = extractSpecifiers(content);
   const targetDir = path.dirname(targetAbsPath);
   const declaredDeps = loadDeclaredDependencies(targetDir);
+  const siblingSet = new Set(siblingAbsPaths);
 
   const results = specifiers.map((specifier) => {
     if (specifier.startsWith(".")) {
@@ -75,7 +85,9 @@ function checkImports(content, targetAbsPath) {
         ...RESOLVE_EXTENSIONS.map((ext) => baseAbsPath + ext),
         ...RESOLVE_EXTENSIONS.map((ext) => path.join(baseAbsPath, "index" + ext))
       ];
-      const exists = candidates.some((c) => fs.existsSync(c) && fs.statSync(c).isFile());
+      const existsOnDisk = candidates.some((c) => fs.existsSync(c) && fs.statSync(c).isFile());
+      const existsAsSibling = candidates.some((c) => siblingSet.has(c));
+      const exists = existsOnDisk || existsAsSibling;
       return { specifier, type: "relative", status: exists ? "ok" : "missing" };
     }
 
