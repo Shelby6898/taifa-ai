@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import { authFetch } from "./authFetch";
 import FileTree from "./FileTree";
 
 function Chat() {
@@ -26,7 +27,7 @@ function Chat() {
     setInput("");
 
     try {
-      const response = await fetch("http://localhost:5000/api/chat", {
+      const response = await authFetch("http://localhost:5000/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: userMsg.content, history: messages })
@@ -172,7 +173,7 @@ function Chat() {
     setWriteStatus("Writing...");
 
     try {
-      const response = await fetch("http://localhost:5000/api/write", {
+      const response = await authFetch("http://localhost:5000/api/write", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -208,7 +209,7 @@ function Chat() {
     setPlanStatus("Generating diffs for each file...");
 
     try {
-      const response = await fetch("http://localhost:5000/api/plan/approve", {
+      const response = await authFetch("http://localhost:5000/api/plan/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId: pendingPlan.planId })
@@ -232,7 +233,7 @@ function Chat() {
     if (!pendingPlan) return;
 
     try {
-      await fetch("http://localhost:5000/api/plan/reject", {
+      await authFetch("http://localhost:5000/api/plan/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId: pendingPlan.planId })
@@ -250,7 +251,7 @@ function Chat() {
     setToolActionStatus("Running...");
 
     try {
-      const response = await fetch("http://localhost:5000/api/tool-action/approve", {
+      const response = await authFetch("http://localhost:5000/api/tool-action/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ actionId: pendingToolAction.actionId })
@@ -277,7 +278,7 @@ function Chat() {
     if (!pendingToolAction) return;
 
     try {
-      await fetch("http://localhost:5000/api/tool-action/reject", {
+      await authFetch("http://localhost:5000/api/tool-action/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ actionId: pendingToolAction.actionId })
@@ -295,7 +296,7 @@ function Chat() {
     setPlanStatus("Applying all files...");
 
     try {
-      const response = await fetch("http://localhost:5000/api/plan/apply", {
+      const response = await authFetch("http://localhost:5000/api/plan/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId: pendingDiffs.planId })
@@ -322,7 +323,7 @@ function Chat() {
     if (!pendingDiffs) return;
 
     try {
-      await fetch("http://localhost:5000/api/plan/reject", {
+      await authFetch("http://localhost:5000/api/plan/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId: pendingDiffs.planId })
@@ -336,186 +337,152 @@ function Chat() {
   };
 
   return (
-    <div style={{ maxWidth: 700, margin: "0 auto", padding: 16, fontFamily: "sans-serif" }}>
-      <h2>Taifa AI</h2>
-      <FileTree />
+    <div className="chat-shell">
+      <div className="chat-header">
+        <h2 className="chat-title">
+          Taifa <span className="accent">AI</span>
+        </h2>
+        <FileTree />
+      </div>
 
-      <div style={{ minHeight: 300, border: "1px solid #ccc", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+      <div className="chat-log">
         {messages.length === 0 && !pendingWrite && !pendingPlan && !pendingDiffs && (
-          <p style={{ color: "#888" }}>Start a conversation...</p>
+          <p className="chat-empty">start a conversation...</p>
         )}
         {messages.map((m, i) => (
-          <div key={i} style={{ margin: "10px 0" }}>
-            <strong>{m.role === "user" ? "You" : "Taifa"}:</strong> {m.content}
+          <div key={i} className="msg">
+            <span className={`msg-role ${m.role === "user" ? "msg-role-user" : "msg-role-ai"}`}>
+              {m.role === "user" ? "you" : "taifa"}
+            </span>
+            <span className="msg-content">{m.content}</span>
           </div>
         ))}
       </div>
 
       {pendingWrite && (
-        <div style={{ border: "2px solid #e0a800", borderRadius: 8, padding: 12, marginBottom: 16, background: "#fffbea" }}>
-          <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
-            Proposed {pendingWrite.mode === "edit" ? "edit" : "new file"}: {pendingWrite.targetPath}
+        <div className="panel panel-write">
+          <p className="panel-title">
+            {pendingWrite.mode === "edit" ? "proposed edit" : "proposed new file"}: {pendingWrite.targetPath}
           </p>
           {pendingWrite.locationMethod && (
-            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: pendingWrite.locationMethod === "stack_trace" ? "#28a745" : "#e0a800" }}>
+            <p className={`panel-note ${pendingWrite.locationMethod === "stack_trace" ? "panel-note-ok" : "panel-note-warn"}`}>
               {pendingWrite.locationMethod === "stack_trace"
-                ? "📍 Found via stack trace"
-                : "🔍 Best guess via keyword search — review carefully"}
+                ? "found via stack trace"
+                : "best guess via keyword search — review carefully"}
             </p>
           )}
           {pendingWrite.isDocumentation && (
-            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#e0a800", fontWeight: "bold" }}>
-              ⚠️ AI-generated documentation — technical claims (libraries, frameworks, architecture) may be inaccurate. Verify against the actual file content below before approving.
+            <p className="panel-note panel-note-warn">
+              ai-generated documentation — technical claims may be inaccurate. verify against the file content below before approving.
             </p>
           )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>BEFORE</div>
-              <pre style={{ background: "#f5f5f5", padding: 8, borderRadius: 4, fontSize: 12, overflowX: "auto", minHeight: 60 }}>
-                {pendingWrite.before || "(new file — no previous content)"}
-              </pre>
+          <div className="diff-pair">
+            <div className="diff-block">
+              <div className="diff-label">before</div>
+              <pre className="diff-pre diff-before">{pendingWrite.before || "(new file — no previous content)"}</pre>
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>AFTER</div>
-              <pre style={{ background: "#eafbea", padding: 8, borderRadius: 4, fontSize: 12, overflowX: "auto", minHeight: 60 }}>
-                {pendingWrite.after}
-              </pre>
+            <div className="diff-block">
+              <div className="diff-label">after</div>
+              <pre className="diff-pre diff-after">{pendingWrite.after}</pre>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={approveWrite} style={{ background: "#28a745", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Approve
-            </button>
-            <button onClick={rejectWrite} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Reject
-            </button>
+          <div className="panel-actions">
+            <button onClick={approveWrite} className="btn-approve">approve</button>
+            <button onClick={rejectWrite} className="btn-reject">reject</button>
           </div>
         </div>
       )}
 
       {pendingPlan && (
-        <div style={{ border: "2px solid #0d6efd", borderRadius: 8, padding: 12, marginBottom: 16, background: "#f0f4ff" }}>
-          <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
-            📋 Proposed plan: {pendingPlan.description}
-          </p>
+        <div className="panel panel-plan">
+          <p className="panel-title">proposed plan: {pendingPlan.description}</p>
           {pendingPlan.truncated && (
-            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#dc3545", fontWeight: "bold" }}>
-              ⚠️ Plan was truncated to 5 files. Dropped: {pendingPlan.truncatedFiles?.join(", ")}
+            <p className="panel-note panel-note-danger">
+              plan was truncated to 5 files. dropped: {pendingPlan.truncatedFiles?.join(", ")}
             </p>
           )}
-          <div style={{ marginBottom: 8 }}>
+          <div className="plan-files">
             {pendingPlan.files.map((f, i) => (
-              <div key={i} style={{ padding: "6px 0", borderBottom: "1px solid #dde" }}>
-                <div style={{ fontSize: 13, fontWeight: "bold" }}>{f.path}</div>
-                <div style={{ fontSize: 12, color: "#555" }}>{f.description}</div>
+              <div key={i} className="plan-file">
+                <div className="plan-file-path">{f.path}</div>
+                <div className="plan-file-desc">{f.description}</div>
               </div>
             ))}
           </div>
-          <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#555" }}>
-            Approving will generate code for each file above. You will review all diffs before anything is written to disk.
+          <p className="panel-hint">
+            approving will generate code for each file above. you will review all diffs before anything is written to disk.
           </p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={approvePlan} style={{ background: "#0d6efd", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Approve Plan
-            </button>
-            <button onClick={rejectPlan} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Reject Plan
-            </button>
+          <div className="panel-actions">
+            <button onClick={approvePlan} className="btn-approve">approve plan</button>
+            <button onClick={rejectPlan} className="btn-reject">reject plan</button>
           </div>
         </div>
       )}
 
       {pendingToolAction && (
-        <div style={{ border: "2px solid #6f42c1", borderRadius: 8, padding: 12, marginBottom: 16, background: "#f6f0ff" }}>
+        <div className="panel panel-tool">
           {pendingToolAction.type === "commit" ? (
             <>
-              <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
-                💾 Proposed commit: "{pendingToolAction.message}"
-              </p>
-              <pre style={{ fontSize: 11, background: "#fff", padding: 8, borderRadius: 4, overflowX: "auto", maxHeight: 200 }}>
-                {pendingToolAction.diffPreview}
-              </pre>
+              <p className="panel-title">proposed commit: "{pendingToolAction.message}"</p>
+              <pre className="diff-pre">{pendingToolAction.diffPreview}</pre>
             </>
           ) : (
-            <p style={{ margin: "0 0 8px 0", fontWeight: "bold" }}>
-              📦 About to run: npm install {pendingToolAction.packageName}
-            </p>
+            <p className="panel-title">about to run: npm install {pendingToolAction.packageName}</p>
           )}
-          {toolActionStatus && (
-            <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#555" }}>{toolActionStatus}</p>
-          )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={approveToolAction} style={{ background: "#6f42c1", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Approve
-            </button>
-            <button onClick={rejectToolAction} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Reject
-            </button>
+          {toolActionStatus && <p className="panel-hint">{toolActionStatus}</p>}
+          <div className="panel-actions">
+            <button onClick={approveToolAction} className="btn-approve">approve</button>
+            <button onClick={rejectToolAction} className="btn-reject">reject</button>
           </div>
         </div>
       )}
 
       {pendingDiffs && (
-        <div style={{ border: "2px solid #198754", borderRadius: 8, padding: 12, marginBottom: 16, background: "#f0fff4" }}>
-          <p style={{ margin: "0 0 12px 0", fontWeight: "bold" }}>
-            📝 Review all diffs — {pendingDiffs.files.length} file{pendingDiffs.files.length > 1 ? "s" : ""}
+        <div className="panel panel-diffs">
+          <p className="panel-title">
+            review all diffs — {pendingDiffs.files.length} file{pendingDiffs.files.length > 1 ? "s" : ""}
           </p>
           {pendingDiffs.files.map((f, i) => (
-            <div key={i} style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: "bold", marginBottom: 4 }}>
-                {f.mode === "edit" ? "✏️ Edit" : "➕ New"}: {f.path}
+            <div key={i} className="diff-file">
+              <div className="diff-file-path">
+                {f.mode === "edit" ? "edit" : "new"}: {f.path}
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div>
-                  <div style={{ fontSize: 11, color: "#888", marginBottom: 2 }}>BEFORE</div>
-                  <pre style={{ background: "#f5f5f5", padding: 8, borderRadius: 4, fontSize: 11, overflowX: "auto", minHeight: 40, margin: 0 }}>
-                    {f.before || "(new file — no previous content)"}
-                  </pre>
+              <div className="diff-pair">
+                <div className="diff-block">
+                  <div className="diff-label">before</div>
+                  <pre className="diff-pre diff-before">{f.before || "(new file — no previous content)"}</pre>
                 </div>
-                <div>
-                  <div style={{ fontSize: 11, color: "#888", marginBottom: 2 }}>AFTER</div>
-                  <pre style={{ background: "#eafbea", padding: 8, borderRadius: 4, fontSize: 11, overflowX: "auto", minHeight: 40, margin: 0 }}>
-                    {f.after}
-                  </pre>
+                <div className="diff-block">
+                  <div className="diff-label">after</div>
+                  <pre className="diff-pre diff-after">{f.after}</pre>
                 </div>
               </div>
             </div>
           ))}
-          <p style={{ margin: "0 0 8px 0", fontSize: 12, color: "#555" }}>
-            This is all-or-nothing. Approving writes all files; rejecting writes none.
-          </p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={applyPlan} style={{ background: "#198754", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Apply All
-            </button>
-            <button onClick={rejectDiffs} style={{ background: "#dc3545", color: "white", border: "none", padding: "8px 16px", borderRadius: 4 }}>
-              Reject All
-            </button>
+          <p className="panel-hint">this is all-or-nothing. approving writes all files; rejecting writes none.</p>
+          <div className="panel-actions">
+            <button onClick={applyPlan} className="btn-approve">apply all</button>
+            <button onClick={rejectDiffs} className="btn-reject">reject all</button>
           </div>
         </div>
       )}
 
-      {writeStatus && (
-        <div style={{ marginBottom: 16, color: "#555", fontSize: 14 }}>{writeStatus}</div>
-      )}
+      {writeStatus && <div className="status-line">{writeStatus}</div>}
+      {planStatus && <div className="status-line">{planStatus}</div>}
 
-      {planStatus && (
-        <div style={{ marginBottom: 16, color: "#555", fontSize: 14 }}>{planStatus}</div>
-      )}
-
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="composer">
         <textarea
           autoCapitalize="off"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={isStreaming}
-          placeholder="Ask something, or: plan: what to build (Enter for new line, tap Send to submit)"
+          placeholder="ask something, or: plan: what to build (enter for new line, tap send to submit)"
           rows={1}
-          style={{ flex: 1, padding: 8, resize: "vertical", fontFamily: "inherit", fontSize: "inherit" }}
+          className="composer-input"
         />
-        <button onClick={sendMessage} disabled={isStreaming}>
-          {isStreaming ? "Thinking..." : "Send"}
+        <button onClick={sendMessage} disabled={isStreaming} className="composer-send">
+          {isStreaming ? "thinking..." : "send"}
         </button>
       </div>
     </div>
