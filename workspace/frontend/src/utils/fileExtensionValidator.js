@@ -1,6 +1,0 @@
-const allowedFileExtensions = ['jpg', 'jpeg', 'png', 'gif'];
-
-export function validateFileExtension(fileName) {
-  const fileNameLowerCase = fileName.toLowerCase();
-  return allowedFileExtensions.includes(fileNameLowerCase);
-}
