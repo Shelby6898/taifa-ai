@@ -14,3 +14,4 @@ frontend/build/
 # OS/editor cruft
 .DS_Store
 *.swp
+backend/data/

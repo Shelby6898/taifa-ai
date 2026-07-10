@@ -27,6 +27,8 @@ const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
+const authRoutes = require("./authRoutes");
+const { requireAuth } = require("./authMiddleware");
 
 const app = express();
 
@@ -69,9 +71,9 @@ async function generateBatchPlan({ description, completedFiles }) {
   return { files, truncated: droppedFiles !== null, truncatedFiles, droppedFiles };
 }
 const MAX_HISTORY_TURNS = 3;
-
 app.use(cors());
 app.use(express.json());
+app.use("/api/auth", authRoutes);
 
 app.get("/", (req, res) => {
   res.json({
@@ -82,7 +84,7 @@ app.get("/", (req, res) => {
   });
 });
 
-app.post("/api/reindex", (req, res) => {
+app.post("/api/reindex", requireAuth, (req, res) => {
   try {
     const index = buildIndex();
     res.json({ success: true, filesIndexed: index.length });
@@ -589,7 +591,7 @@ async function handleInstallCommand(installCommand, res) {
   });
 }
 
-app.post("/api/tool-action/approve", async (req, res) => {
+app.post("/api/tool-action/approve", requireAuth, async (req, res) => {
   const { actionId } = req.body;
 
   if (!isValidActionId(actionId)) {
@@ -639,7 +641,7 @@ app.post("/api/tool-action/approve", async (req, res) => {
   }
 });
 
-app.post("/api/tool-action/reject", (req, res) => {
+app.post("/api/tool-action/reject", requireAuth, (req, res) => {
   const { actionId } = req.body;
 
   if (!isValidActionId(actionId)) {
@@ -776,7 +778,7 @@ function handleExecutePlanCommand(executePlanCommand, res) {
   });
 }
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", requireAuth, async (req, res) => {
   const { prompt, history } = req.body;
 
   if (!prompt) {
@@ -899,7 +901,7 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-app.post("/api/write", (req, res) => {
+app.post("/api/write", requireAuth, (req, res) => {
   const { targetPath, content } = req.body;
 
   if (!targetPath || typeof content !== "string") {
@@ -941,7 +943,7 @@ app.post("/api/write", (req, res) => {
   }
 });
 
-app.get("/api/plan/current", (req, res) => {
+app.get("/api/plan/current", requireAuth, (req, res) => {
   const plan = getPendingPlan();
   if (!plan) {
     return res.json({ success: false, reason: "No pending plan" });
@@ -949,7 +951,7 @@ app.get("/api/plan/current", (req, res) => {
   return res.json({ success: true, plan });
 });
 
-app.post("/api/plan/reject", (req, res) => {
+app.post("/api/plan/reject", requireAuth, (req, res) => {
   const { planId } = req.body;
 
   if (!isValidPlanId(planId)) {
@@ -967,7 +969,7 @@ app.post("/api/plan/reject", (req, res) => {
   return res.json({ success: true, action: "plan_cleared", campaignCleared });
 });
 
-app.post("/api/plan/approve", async (req, res) => {
+app.post("/api/plan/approve", requireAuth, async (req, res) => {
   const { planId } = req.body;
 
   if (!isValidPlanId(planId)) {
@@ -1065,7 +1067,7 @@ app.post("/api/plan/approve", async (req, res) => {
   }
 });
 
-app.post("/api/plan/apply", async (req, res) => {
+app.post("/api/plan/apply", requireAuth, async (req, res) => {
   const { planId } = req.body;
 
   if (!isValidPlanId(planId)) {
@@ -1176,7 +1178,7 @@ app.post("/api/plan/apply", async (req, res) => {
   }
 });
 
-app.get("/api/files", (req, res) => {
+app.get("/api/files", requireAuth, (req, res) => {
   try {
     const tree = buildTree();
     res.json({ success: true, tree });
