@@ -134,7 +134,24 @@ async function generatePlan(params) {
   return response.data.response;
 }
 
-function buildSelfReviewPrompt(code) {
+function buildSelfReviewPrompt(code, verificationContext = {}) {
+  const { syntaxCheck, importCheck, lintCheck } = verificationContext;
+
+  const contextLines = [];
+  if (syntaxCheck && syntaxCheck.valid === false) {
+    contextLines.push(`- Syntax checker found this file INVALID: ${syntaxCheck.error || "unspecified syntax error"}`);
+  }
+  if (importCheck && importCheck.hasMissing) {
+    contextLines.push(`- Import checker found MISSING imports: ${JSON.stringify(importCheck.missing || importCheck)}`);
+  }
+  if (lintCheck && Array.isArray(lintCheck) && lintCheck.length > 0) {
+    contextLines.push(`- Lint checker found ${lintCheck.length} issue(s): ${lintCheck.map((l) => l.message || JSON.stringify(l)).join("; ")}`);
+  }
+
+  const automatedFindings = contextLines.length > 0
+    ? `\n\nAutomated checks already found the following issues in this file — take these into account, and if they represent a real problem, you MUST answer YES and reference them:\n${contextLines.join("\n")}\n`
+    : "\n\nAutomated syntax, import, and lint checks found no issues in this file.\n";
+
   return `You are reviewing a code snippet. Most code you review will be completely fine — only answer YES if there is a specific, concrete, undeniable bug such as a reference to an undefined variable, a misspelled identifier, or a clear logic error. Do not invent a problem that is not really there.
 
 Example 1:
@@ -147,15 +164,15 @@ Answer: YES: "nam" is misspelled and should be "name", which will cause a Refere
 
 Now review this code:
 ${code}
-
+${automatedFindings}
 Answer in exactly this format, nothing else:
 NO
 or
 YES: <one short sentence describing the specific problem>`;
 }
 
-async function generateSelfReview(code) {
-  const prompt = buildSelfReviewPrompt(code);
+async function generateSelfReview(code, verificationContext = {}) {
+  const prompt = buildSelfReviewPrompt(code, verificationContext);
 
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,

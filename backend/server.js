@@ -166,7 +166,7 @@ async function handleWriteCommand(parsedCommand, res) {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
     const selfReviewResult = parseSelfReview(rawSelfReview);
 
     return res.json({
@@ -267,7 +267,7 @@ async function handleWriteTestsCommand(targetPath, res) {
     const importResult = checkImports(cleanedContent, testSafetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
     const selfReviewResult = parseSelfReview(rawSelfReview);
 
     return res.json({
@@ -361,7 +361,7 @@ async function handleFixCommand(fixCommand, res) {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
     const selfReviewResult = parseSelfReview(rawSelfReview);
 
     return res.json({
@@ -1033,7 +1033,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath, batchSiblingPaths);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent);
+    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
     const selfReviewResult = parseSelfReview(rawSelfReview);
 
       enrichedFiles.push({
