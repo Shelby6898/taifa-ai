@@ -1,13 +1,34 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 
 function generateToken(userId) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET || 'dev-secret', { expiresIn: '1h' });
 }
 
-router.post('/register', async (req, res) => {
+// Login is the real brute-force target — strict limit per IP.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again later.' }
+});
+
+// Registration is lighter but still worth throttling to prevent
+// automated account-creation spam.
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registration attempts. Please try again later.' }
+});
+
+router.post('/register', registerLimiter, async (req, res) => {
   const { username, email, password } = req.body;
 
   if (!username || !email || !password) {
@@ -22,7 +43,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -30,8 +51,11 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ username, password });
+    const user = await User.findOne({ username });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const passwordMatches = await bcrypt.compare(password, user.password);
+    if (!passwordMatches) return res.status(401).json({ error: 'Invalid credentials' });
 
     res.json({ message: 'Login successful', token: generateToken(user._id) });
   } catch (error) {
