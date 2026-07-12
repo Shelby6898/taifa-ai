@@ -48,6 +48,30 @@ qwen2.5-coder-6k custom model (num_ctx 6144, verified stable)
 - AI self-review (advisory only, not authoritative)
 - Test generation (write tests: path.js) with a hard deterministic module-system mismatch check that refuses guaranteed-crash diffs
 
+### Phase 6 — Human-Supplied Architecture
+Full autonomous project building was deliberately ruled out: the local
+model cannot reliably hold multi-file architectural coherence, and a
+cloud-model hybrid was rejected outright since local-only processing is
+a real security requirement, not a preference. Instead, this shifts the
+one thing the model is unreliable at (inventing architecture) to the
+human, keeping the model doing only what it has shown it can do
+reasonably: generate one file's content against a clear description.
+- execute plan: <description>, followed by one path: description line
+  per file, entered via a multi-line textarea (Enter adds a newline,
+  Send submits, since mobile keyboards do not reliably expose Shift+Enter)
+- Reuses the exact multi-batch campaign system from Phase 3 unchanged;
+  the only new code is a parser producing a file list from human input
+  instead of a model call
+- Every downstream step is identical to any other plan: generation,
+  syntax/import/lint/self-review checks, diff review, batch-by-batch
+  approval
+- Fixed a real bug found during testing: import checking only ever
+  checked against real on-disk state, so a batch creating a new source
+  file and its test together would always falsely report the sibling
+  import as missing since neither file exists on disk until the whole
+  batch is applied. Files proposed together in the same batch are now
+  treated as resolvable against each other.
+
 ## Setup
 
 Prerequisites: Node.js, npm, and Ollama installed.
@@ -73,6 +97,7 @@ Commands:
 - fix this: <error> — locate and propose a fix
 - document — generate a workspace README
 - plan: <description> — propose a multi-file change, batched if needed
+- execute plan: <description> followed by one path: description line per file — human-supplied architecture, batched the same way
 - remember: <fact> — store a persistent project fact
 - run tests — execute the workspace test suite
 - git status / git diff — read-only git inspection
@@ -128,7 +153,7 @@ workspace/ — sandbox folder the agent reads from and writes to
 
 ## Status
 
-All five originally planned phases complete. Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
+All six phases complete, including a deliberately rescoped Phase 6 (the original fully-autonomous-project-building vision was ruled out as unrealistic and unsafe for a local-only 1.5B model; the human-supplied-architecture version keeps the same safety guarantees while getting real practical value). Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
 
 ## Known limitations
 
