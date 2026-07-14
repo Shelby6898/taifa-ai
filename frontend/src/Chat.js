@@ -63,6 +63,27 @@ function Chat() {
             ...prev,
             { role: "assistant", content: `${data.message}\n\n${fileList}` }
           ]);
+        } else if (data.action === "requirements_summary") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `${data.message}\n\n${data.summary}` }
+          ]);
+        } else if (data.action === "architecture_blueprint") {
+          const b = data.blueprint;
+          const lines = [
+            `Frontend: ${b.frontend}`,
+            `Backend: ${b.backend}`,
+            `Database: ${b.database}`,
+            `Authentication: ${b.authentication}`,
+            `Storage: ${b.storage}`,
+            `Collections: ${(b.collections || []).join(", ")}`,
+            `Modules: ${(b.modules || []).join(", ")}`,
+            `Estimated files: ${b.estimatedFiles}`
+          ].join("\n");
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `${data.message}\n\n${lines}` }
+          ]);
         } else if (data.action === "fact_remembered") {
           setMessages((prev) => [
             ...prev,

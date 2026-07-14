@@ -254,6 +254,41 @@ async function generateTestFile(params) {
   return response.data.response;
 }
 
+function buildBlueprintPrompt(description) {
+  return `Based on the following project requirements, produce a concise architecture blueprint.
+
+Requirements:
+${description}
+
+Output ONLY a raw JSON object with exactly these fields, nothing else:
+{
+  "frontend": "short string naming the frontend technology",
+  "backend": "short string naming the backend technology",
+  "database": "short string naming the database technology",
+  "authentication": "short string describing the auth approach",
+  "storage": "short string describing file/media storage, or 'none' if not needed",
+  "collections": ["list", "of", "main", "data", "entities", "or", "tables"],
+  "modules": ["list", "of", "main", "functional", "modules", "or", "features"],
+  "estimatedFiles": 20
+}
+
+The estimatedFiles field must be a realistic integer estimate of total files needed for a complete implementation, not a placeholder.
+
+Do not wrap the JSON in markdown code fences. Do not include any explanation before or after the JSON.`;
+}
+
+async function generateBlueprint(description) {
+  const prompt = buildBlueprintPrompt(description);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false
+  });
+
+  return response.data.response;
+}
+
 module.exports = {
   generateFileContent,
   generateFix,
@@ -268,5 +303,7 @@ module.exports = {
   buildSelfReviewPrompt,
   buildTestGenerationPrompt,
   buildClarifyingQuestionsPrompt,
-  generateClarifyingQuestions
+  generateClarifyingQuestions,
+  buildBlueprintPrompt,
+  generateBlueprint
 };

@@ -8,7 +8,7 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint } = require("./generateFileContent");
 const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
 const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
@@ -27,7 +27,8 @@ const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
-const { hasPendingClarification, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildEnrichedDescription, beginArchitectureConfirmation, isAwaitingArchitectureConfirmation, getArchitectureCheckData, clearClarification } = require("./clarificationState");
+const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
+const { FIXED_PLANNING_QUESTIONS } = require("./planningQuestions");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
@@ -687,29 +688,16 @@ async function handlePlanCommand(planCommand, res) {
       reason: "A clarification session is already in progress. Answer the pending question before starting something new."
     });
   }
+  startClarification({ description: planCommand.description, questions: FIXED_PLANNING_QUESTIONS });
 
-  try {
-    const rawQuestions = await generateClarifyingQuestions(planCommand.description);
-    const cleanedQuestions = stripCodeFences(rawQuestions);
-    const questions = JSON.parse(cleanedQuestions);
+  return res.json({
+    success: true,
+    action: "clarification_question",
+    question: getCurrentQuestion(),
+    questionNumber: 1,
+    totalQuestions: FIXED_PLANNING_QUESTIONS.length
+  });
 
-    if (!Array.isArray(questions) || questions.length === 0) {
-      return generateAndReturnPlan(planCommand.description, res);
-    }
-
-    startClarification({ description: planCommand.description, questions });
-
-    return res.json({
-      success: true,
-      action: "clarification_question",
-      question: getCurrentQuestion(),
-      questionNumber: 1,
-      totalQuestions: questions.length
-    });
-  } catch (err) {
-    console.error("Clarifying question generation failed, proceeding without clarification:", err.message);
-    return generateAndReturnPlan(planCommand.description, res);
-  }
 }
 
 // Shared by both the direct plan: <description> flow (once clarifying
@@ -826,44 +814,110 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return res.status(400).json({ success: false, error: "prompt is required" });
   }
   if (hasPendingClarification()) {
-    if (isAwaitingArchitectureConfirmation()) {
-      const trimmedPrompt = prompt.trim();
-      const confirmPattern = /^(yes|yep|yeah|correct|looks good|proceed|go ahead|that'?s right|sounds good|confirmed|ok|okay)\b/i;
-      const isConfirmation = confirmPattern.test(trimmedPrompt);
+    const phase = getPhase();
+    const trimmedPrompt = prompt.trim();
+    const confirmPattern = /^(yes|yep|yeah|correct|looks good|proceed|go ahead|that'?s right|sounds good|confirmed|ok|okay|approve)\b/i;
+    const isConfirmation = confirmPattern.test(trimmedPrompt);
 
-      const architectureData = getArchitectureCheckData();
-      clearClarification();
-
-      if (isConfirmation) {
-        return generateAndReturnPlan(architectureData.enrichedDescription, res);
+    if (phase === "summary") {
+      if (!isConfirmation) {
+        const revisedDescription = getEnrichedDescription() + "\n\nRevision from the user:\n" + trimmedPrompt;
+        setEnrichedDescription(revisedDescription);
+        return res.json({
+          success: true,
+          action: "requirements_summary",
+          summary: revisedDescription,
+          message: "Updated. Does this accurately capture your requirements? Reply \"approve\" to continue, or describe another change."
+        });
       }
 
-      const correctedDescription = architectureData.enrichedDescription + "\n\nCorrection from the user about the existing repository structure (this overrides anything assumed above about which files already exist or where they live):\n" + trimmedPrompt;
-      return generateAndReturnPlan(correctedDescription, res);
+      const enrichedDescription = getEnrichedDescription();
+      const relevantFiles = searchIndex(enrichedDescription, 5);
+
+      if (!relevantFiles || relevantFiles.length === 0) {
+        try {
+          const rawBlueprint = await generateBlueprint(enrichedDescription);
+          const cleanedBlueprint = stripCodeFences(rawBlueprint);
+          const blueprint = JSON.parse(cleanedBlueprint);
+          beginBlueprintConfirmation({ blueprint });
+          return res.json({
+            success: true,
+            action: "architecture_blueprint",
+            blueprint,
+            message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or describe a change."
+          });
+        } catch (err) {
+          console.error("Blueprint generation failed, proceeding without it:", err.message);
+          clearClarification();
+          return generateAndReturnPlan(enrichedDescription, res);
+        }
+      }
+
+      beginArchitectureConfirmation({ relevantFiles });
+      return res.json({
+        success: true,
+        action: "architecture_context_check",
+        relevantFiles: relevantFiles.map((f) => f.path),
+        message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
+      });
     }
 
-    const trimmedPrompt = prompt.trim();
+    if (phase === "architecture") {
+      let finalDescription = getEnrichedDescription();
+      if (!isConfirmation) {
+        finalDescription = finalDescription + "\n\nCorrection from the user about the existing repository structure (this overrides anything assumed above about which files already exist or where they live):\n" + trimmedPrompt;
+        setEnrichedDescription(finalDescription);
+      }
+
+      try {
+        const rawBlueprint = await generateBlueprint(finalDescription);
+        const cleanedBlueprint = stripCodeFences(rawBlueprint);
+        const blueprint = JSON.parse(cleanedBlueprint);
+        beginBlueprintConfirmation({ blueprint });
+        return res.json({
+          success: true,
+          action: "architecture_blueprint",
+          blueprint,
+          message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or describe a change."
+        });
+      } catch (err) {
+        console.error("Blueprint generation failed, proceeding without it:", err.message);
+        clearClarification();
+        return generateAndReturnPlan(finalDescription, res);
+      }
+    }
+
+    if (phase === "blueprint") {
+      const enrichedDescription = getEnrichedDescription();
+      const blueprint = getBlueprint();
+      let finalDescription;
+
+      if (isConfirmation) {
+        finalDescription = enrichedDescription + "\n\nAgreed architecture (technology choices below are binding, not suggestions):\n" + JSON.stringify(blueprint);
+      } else {
+        finalDescription = enrichedDescription + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
+      }
+
+      clearClarification();
+      return generateAndReturnPlan(finalDescription, res);
+    }
+
     const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
     const skipped = skipPattern.test(trimmedPrompt);
 
     recordAnswer({ answer: trimmedPrompt, skipped });
 
     if (isComplete()) {
-      const enrichedDescription = buildEnrichedDescription();
-      const relevantFiles = searchIndex(enrichedDescription, 5);
-
-      if (!relevantFiles || relevantFiles.length === 0) {
-        clearClarification();
-        return generateAndReturnPlan(enrichedDescription, res);
-      }
-
-      beginArchitectureConfirmation({ enrichedDescription, relevantFiles });
+      const summary = buildRequirementsSummary();
+      const pending = getPendingClarification();
+      setEnrichedDescription(pending.description + "\n\nRequirements summary:\n" + summary);
+      setPhase("summary");
 
       return res.json({
         success: true,
-        action: "architecture_context_check",
-        relevantFiles: relevantFiles.map((f) => f.path),
-        message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
+        action: "requirements_summary",
+        summary,
+        message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or describe a change."
       });
     }
 
@@ -876,6 +930,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       totalQuestions: clarification.questions.length
     });
   }
+
 
 
 
