@@ -52,6 +52,17 @@ function Chat() {
             ...prev,
             { role: "assistant", content: `Plan rejected: ${data.reason}` }
           ]);
+        } else if (data.action === "clarification_question") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Question ${data.questionNumber} of ${data.totalQuestions}: ${data.question}` }
+          ]);
+        } else if (data.action === "architecture_context_check") {
+          const fileList = data.relevantFiles.map((f) => `- ${f}`).join("\n");
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `${data.message}\n\n${fileList}` }
+          ]);
         } else if (data.action === "fact_remembered") {
           setMessages((prev) => [
             ...prev,
