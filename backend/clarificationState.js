@@ -23,7 +23,10 @@ function startClarification({ description, questions }) {
     description,
     questions, // string[]
     currentIndex: 0,
-    answers: [] // [{ question, answer, skipped }]
+    answers: [], // [{ question, answer, skipped }]
+    awaitingArchitectureConfirmation: false,
+    enrichedDescription: null,
+    relevantFiles: null
   };
 
   return pendingClarification;
@@ -69,6 +72,35 @@ function buildEnrichedDescription() {
   return `${pendingClarification.description}\n\nAdditional context gathered from the user:\n${qaLines.join("\n")}`;
 }
 
+// Second checkpoint, after the question/answer phase completes: before
+// generating a real plan, show the user which existing repo files the
+// automatic indexer considers relevant, so a budget-drop or wrong-file
+// match can be caught and corrected before it silently shapes the plan.
+function beginArchitectureConfirmation({ enrichedDescription, relevantFiles }) {
+  if (!pendingClarification) {
+    return { success: false, reason: "No pending clarification session" };
+  }
+
+  pendingClarification.awaitingArchitectureConfirmation = true;
+  pendingClarification.enrichedDescription = enrichedDescription;
+  pendingClarification.relevantFiles = relevantFiles;
+
+  return { success: true, clarification: pendingClarification };
+}
+
+function isAwaitingArchitectureConfirmation() {
+  if (!pendingClarification) return false;
+  return pendingClarification.awaitingArchitectureConfirmation === true;
+}
+
+function getArchitectureCheckData() {
+  if (!pendingClarification) return null;
+  return {
+    enrichedDescription: pendingClarification.enrichedDescription,
+    relevantFiles: pendingClarification.relevantFiles
+  };
+}
+
 function clearClarification() {
   pendingClarification = null;
 }
@@ -81,5 +113,8 @@ module.exports = {
   isComplete,
   getCurrentQuestion,
   buildEnrichedDescription,
+  beginArchitectureConfirmation,
+  isAwaitingArchitectureConfirmation,
+  getArchitectureCheckData,
   clearClarification
 };

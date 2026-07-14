@@ -27,7 +27,7 @@ const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
-const { hasPendingClarification, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildEnrichedDescription, clearClarification } = require("./clarificationState");
+const { hasPendingClarification, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildEnrichedDescription, beginArchitectureConfirmation, isAwaitingArchitectureConfirmation, getArchitectureCheckData, clearClarification } = require("./clarificationState");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
@@ -825,8 +825,23 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   if (!prompt) {
     return res.status(400).json({ success: false, error: "prompt is required" });
   }
-
   if (hasPendingClarification()) {
+    if (isAwaitingArchitectureConfirmation()) {
+      const trimmedPrompt = prompt.trim();
+      const confirmPattern = /^(yes|yep|yeah|correct|looks good|proceed|go ahead|that'?s right|sounds good|confirmed|ok|okay)\b/i;
+      const isConfirmation = confirmPattern.test(trimmedPrompt);
+
+      const architectureData = getArchitectureCheckData();
+      clearClarification();
+
+      if (isConfirmation) {
+        return generateAndReturnPlan(architectureData.enrichedDescription, res);
+      }
+
+      const correctedDescription = architectureData.enrichedDescription + "\n\nCorrection from the user about the existing repository structure (this overrides anything assumed above about which files already exist or where they live):\n" + trimmedPrompt;
+      return generateAndReturnPlan(correctedDescription, res);
+    }
+
     const trimmedPrompt = prompt.trim();
     const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
     const skipped = skipPattern.test(trimmedPrompt);
@@ -835,8 +850,21 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
     if (isComplete()) {
       const enrichedDescription = buildEnrichedDescription();
-      clearClarification();
-      return generateAndReturnPlan(enrichedDescription, res);
+      const relevantFiles = searchIndex(enrichedDescription, 5);
+
+      if (!relevantFiles || relevantFiles.length === 0) {
+        clearClarification();
+        return generateAndReturnPlan(enrichedDescription, res);
+      }
+
+      beginArchitectureConfirmation({ enrichedDescription, relevantFiles });
+
+      return res.json({
+        success: true,
+        action: "architecture_context_check",
+        relevantFiles: relevantFiles.map((f) => f.path),
+        message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
+      });
     }
 
     const clarification = getPendingClarification();
@@ -848,6 +876,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       totalQuestions: clarification.questions.length
     });
   }
+
+
 
   const rememberCommand = parseRememberCommand(prompt);
   if (rememberCommand.isRememberCommand) {
