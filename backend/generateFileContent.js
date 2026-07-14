@@ -3,21 +3,29 @@ const axios = require("axios");
 const OLLAMA_URL = "http://127.0.0.1:11434";
 const MODEL_NAME = "qwen2.5-coder-6k";
 
-function buildGenerationPrompt({ mode, targetPath, instruction, existingContent }) {
+function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext }) {
+  const contextSection = projectContext
+    ? `Broader project context and requirements, gathered before this file was planned (this may include project-wide technology or architecture constraints — you MUST honor these even if the specific instruction below does not repeat them):\n${projectContext}\n\n`
+    : "";
+
+  const finalReminder = projectContext
+    ? `\n\nIMPORTANT — before you write any code: re-read the project context above and identify any specific technology it names (for example a particular database, framework, or library). You MUST use exactly that technology in the code you write. Do NOT default to Mongoose, MongoDB, or any other common pattern from your training data if a different technology was explicitly specified above — using the wrong technology here is a critical error even if the rest of the code is otherwise correct.`
+    : "";
+
   if (mode === "edit" && existingContent) {
     return `You are editing an existing code file at path "${targetPath}".
 
-Current file content:
+${contextSection}Current file content:
 ${existingContent}
 
-Instruction: ${instruction}
+Instruction: ${instruction}${finalReminder}
 
 Output ONLY the complete updated file content. Do not include any explanation, comments about what you changed, or markdown code fences. Output raw code only, starting from the first line of the file.`;
   }
 
   return `You are creating a new code file at path "${targetPath}".
 
-Instruction: ${instruction}
+${contextSection}Instruction: ${instruction}${finalReminder}
 
 Output ONLY the complete file content. Do not include any explanation, introduction, or markdown code fences. Output raw code only, starting from the first line of the file.`;
 }
@@ -70,7 +78,7 @@ function buildPlanPrompt({ description, fullIndex, completedFiles }) {
 Existing project files:
 ${fullIndex || "(workspace is currently empty)"}
 ${completedSection}
-The user wants: ${description}
+The user's request, including any answers they gave to clarifying questions (these are binding requirements — do not substitute your own preference for anything the user explicitly specified, such as a database or technology choice):\n${description}
 
 Produce a plan as a JSON array. Each item must have exactly two fields:
 - "path": a relative file path (e.g. "backend/routes/userRoutes.js")
@@ -81,9 +89,32 @@ Rules:
 - As a sanity bound, do not exceed 20 files even for a very large task — pick the 20 most essential if it seems larger than that.
 - Reuse existing file paths from the project files shown above when the task means modifying something that already exists, rather than proposing a duplicate new file.
 - Do not propose files unrelated to the user's request.
+- If the user specified a particular technology, database, or architectural choice (for example, a specific database engine, framework, or auth approach), you MUST use exactly what they specified in the relevant file's description. Do not substitute a different technology you consider more common or convenient.
+- If any part of the user's request explicitly states no preference was given and asks you to use your best judgment, you MUST state the specific assumption you made directly in that file's description (for example, "Uses JWT-based auth since no specific preference was given").
 
 Output ONLY the raw JSON array. Do not wrap it in markdown code fences. Do not include any explanation before or after the JSON. Example format:
 [{"path": "backend/example.js", "description": "Adds an example function"}]`;
+}
+
+function buildClarifyingQuestionsPrompt(description) {
+  return `A user wants the following built: "${description}"
+
+Before planning the file structure, you need to ask 3 to 5 short, specific clarifying questions that would materially change what gets built. Focus on things that genuinely affect architecture and cannot be safely guessed: core entities/features involved, data storage choice, authentication/security requirements, and scale or deployment context. Do not ask generic or trivial questions.
+
+Output ONLY a raw JSON array of question strings, nothing else. Example format:
+["What are the main entities this system needs to track?", "Should this use a SQL or NoSQL database?", "Does this need user authentication, and if so, what roles?"]`;
+}
+
+async function generateClarifyingQuestions(description) {
+  const prompt = buildClarifyingQuestionsPrompt(description);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false
+  });
+
+  return response.data.response;
 }
 
 async function generateFileContent(params) {
@@ -235,5 +266,7 @@ module.exports = {
   buildDocumentationPrompt,
   buildPlanPrompt,
   buildSelfReviewPrompt,
-  buildTestGenerationPrompt
+  buildTestGenerationPrompt,
+  buildClarifyingQuestionsPrompt,
+  generateClarifyingQuestions
 };

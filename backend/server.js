@@ -8,7 +8,7 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions } = require("./generateFileContent");
 const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
 const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
@@ -27,6 +27,7 @@ const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
+const { hasPendingClarification, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildEnrichedDescription, clearClarification } = require("./clarificationState");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
@@ -679,9 +680,47 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
+  if (hasPendingClarification()) {
+    return res.status(409).json({
+      success: false,
+      action: "plan_rejected",
+      reason: "A clarification session is already in progress. Answer the pending question before starting something new."
+    });
+  }
+
+  try {
+    const rawQuestions = await generateClarifyingQuestions(planCommand.description);
+    const cleanedQuestions = stripCodeFences(rawQuestions);
+    const questions = JSON.parse(cleanedQuestions);
+
+    if (!Array.isArray(questions) || questions.length === 0) {
+      return generateAndReturnPlan(planCommand.description, res);
+    }
+
+    startClarification({ description: planCommand.description, questions });
+
+    return res.json({
+      success: true,
+      action: "clarification_question",
+      question: getCurrentQuestion(),
+      questionNumber: 1,
+      totalQuestions: questions.length
+    });
+  } catch (err) {
+    console.error("Clarifying question generation failed, proceeding without clarification:", err.message);
+    return generateAndReturnPlan(planCommand.description, res);
+  }
+}
+
+// Shared by both the direct plan: <description> flow (once clarifying
+// questions are answered) and any future caller that already has a
+// complete description. Kept separate from handlePlanCommand so the
+// clarification step can wrap around this without duplicating the
+// actual plan-generation logic.
+async function generateAndReturnPlan(description, res) {
   try {
     const { files: parsedFiles, truncated, truncatedFiles, droppedFiles } = await generateBatchPlan({
-      description: planCommand.description,
+      description,
       completedFiles: []
     });
 
@@ -695,11 +734,11 @@ async function handlePlanCommand(planCommand, res) {
 
     let campaignInfo = null;
     if (truncated) {
-      const campaign = startCampaign({ description: planCommand.description, remainingFiles: droppedFiles });
+      const campaign = startCampaign({ description, remainingFiles: droppedFiles });
       campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
     }
 
-    const plan = createPlan({ description: planCommand.description, files: parsedFiles });
+    const plan = createPlan({ description, files: parsedFiles });
 
     return res.json({
       success: true,
@@ -720,6 +759,7 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 }
+
 
 function handleExecutePlanCommand(executePlanCommand, res) {
   if (executePlanCommand.malformed) {
@@ -784,6 +824,29 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: "prompt is required" });
+  }
+
+  if (hasPendingClarification()) {
+    const trimmedPrompt = prompt.trim();
+    const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
+    const skipped = skipPattern.test(trimmedPrompt);
+
+    recordAnswer({ answer: trimmedPrompt, skipped });
+
+    if (isComplete()) {
+      const enrichedDescription = buildEnrichedDescription();
+      clearClarification();
+      return generateAndReturnPlan(enrichedDescription, res);
+    }
+
+    const clarification = getPendingClarification();
+    return res.json({
+      success: true,
+      action: "clarification_question",
+      question: getCurrentQuestion(),
+      questionNumber: clarification.currentIndex + 1,
+      totalQuestions: clarification.questions.length
+    });
   }
 
   const rememberCommand = parseRememberCommand(prompt);
@@ -1024,6 +1087,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         mode: fileExists ? "edit" : "write",
         targetPath: file.path,
         instruction: file.description,
+        projectContext: plan.description,
         existingContent: fileExists ? existingContent : null
       });
 
