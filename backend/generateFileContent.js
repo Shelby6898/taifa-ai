@@ -92,6 +92,14 @@ Rules:
 - If the user specified a particular technology, database, or architectural choice (for example, a specific database engine, framework, or auth approach), you MUST use exactly what they specified in the relevant file's description. Do not substitute a different technology you consider more common or convenient.
 - If any part of the user's request explicitly states no preference was given and asks you to use your best judgment, you MUST state the specific assumption you made directly in that file's description (for example, "Uses JWT-based auth since no specific preference was given").
 
+IMPORTANT — before producing the JSON: re-read the user's request above and identify the exact technology, database, or framework they specified, if any. Every file description that touches data storage, models, or persistence MUST name that exact technology by name.
+
+Example — if the requirements specify Firestore:
+WRONG: {"path": "backend/models/User.js", "description": "Defines the User model used by the backend."}
+CORRECT: {"path": "backend/models/User.js", "description": "Defines the User model as a Firestore document with fields for name, email, and role."}
+
+A vague description like "the User model" or "database model" is NOT acceptable when a specific technology was given in the requirements — always name it explicitly in the description text itself. Do NOT write a description that implies a different technology than what was specified — for example, do not write "MongoDB", "Mongoose", "SQL", or "relational database" in any file description unless the user specifically asked for one of those. This applies even under time pressure to produce a plan quickly; getting the named technology right is more important than speed.
+
 Output ONLY the raw JSON array. Do not wrap it in markdown code fences. Do not include any explanation before or after the JSON. Example format:
 [{"path": "backend/example.js", "description": "Adds an example function"}]`;
 }
@@ -111,7 +119,8 @@ async function generateClarifyingQuestions(description) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -123,7 +132,8 @@ async function generateFileContent(params) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -135,7 +145,8 @@ async function generateFix(params) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -147,7 +158,8 @@ async function generateDocumentation(params) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -159,7 +171,8 @@ async function generatePlan(params) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -208,7 +221,8 @@ async function generateSelfReview(code, verificationContext = {}) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -248,7 +262,8 @@ async function generateTestFile(params) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;
@@ -283,7 +298,8 @@ async function generateBlueprint(description) {
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
     model: MODEL_NAME,
     prompt,
-    stream: false
+    stream: false,
+    options: { num_predict: 1500 }
   });
 
   return response.data.response;

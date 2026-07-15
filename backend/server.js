@@ -50,7 +50,36 @@ function syncReindexWorkspace() {
   buildDbSchemaGraph();
 }
 
-async function generateBatchPlan({ description, completedFiles }) {
+// Deterministic safety net for the technology-naming instruction in
+// buildPlanPrompt. Prompt engineering alone was tested three ways
+// (basic rule, recency-positioned reminder, concrete before/after
+// example) and reliably stops the model from naming the WRONG
+// technology, but does not reliably make it proactively name the
+// RIGHT one in every relevant file. Since the correct technology is
+// already known as structured data (blueprint.database), fix it here
+// with plain string logic instead of continuing to trust the model.
+const STORAGE_PATH_HINT = /\/models\//i;
+const STORAGE_KEYWORD_HINT = /model|schema|database|persist|collection|document|repository/i;
+
+function annotateStorageFiles(fileList, blueprint) {
+  if (!blueprint || !blueprint.database) return fileList;
+
+  const dbName = blueprint.database;
+  const escaped = dbName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const alreadyNamedPattern = new RegExp(escaped, "i");
+
+  return fileList.map((f) => {
+    const touchesStorage = STORAGE_PATH_HINT.test(f.path) || STORAGE_KEYWORD_HINT.test(f.description);
+    const alreadyNamed = alreadyNamedPattern.test(f.description);
+
+    if (touchesStorage && !alreadyNamed) {
+      return { ...f, description: `${f.description} (uses ${dbName}, per agreed architecture)` };
+    }
+    return f;
+  });
+}
+
+async function generateBatchPlan({ description, completedFiles, blueprint }) {
   const MAX_PLAN_FILES = 5;
   const fullIndex = formatFullIndex(description);
   const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
@@ -61,8 +90,17 @@ async function generateBatchPlan({ description, completedFiles }) {
     throw new Error("Generated plan was not a JSON array");
   }
 
+  const seenPaths = new Set();
+  const dedupedFiles = parsedFiles.filter((f) => {
+    if (seenPaths.has(f.path)) return false;
+    seenPaths.add(f.path);
+    return true;
+  });
+
+  const annotatedFiles = annotateStorageFiles(dedupedFiles, blueprint);
+
   let droppedFiles = null;
-  let files = parsedFiles;
+  let files = annotatedFiles;
 
   if (files.length > MAX_PLAN_FILES) {
     droppedFiles = files.slice(MAX_PLAN_FILES);
@@ -73,6 +111,7 @@ async function generateBatchPlan({ description, completedFiles }) {
 
   return { files, truncated: droppedFiles !== null, truncatedFiles, droppedFiles };
 }
+
 const MAX_HISTORY_TURNS = 3;
 app.use(cors());
 app.use(express.json());
@@ -705,11 +744,12 @@ async function handlePlanCommand(planCommand, res) {
 // complete description. Kept separate from handlePlanCommand so the
 // clarification step can wrap around this without duplicating the
 // actual plan-generation logic.
-async function generateAndReturnPlan(description, res) {
+async function generateAndReturnPlan(description, res, blueprint) {
   try {
     const { files: parsedFiles, truncated, truncatedFiles, droppedFiles } = await generateBatchPlan({
       description,
-      completedFiles: []
+      completedFiles: [],
+      blueprint
     });
 
     if (!Array.isArray(parsedFiles) || parsedFiles.length === 0) {
@@ -899,7 +939,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       }
 
       clearClarification();
-      return generateAndReturnPlan(finalDescription, res);
+      return generateAndReturnPlan(finalDescription, res, isConfirmation ? blueprint : null);
     }
 
     const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
