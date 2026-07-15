@@ -340,7 +340,19 @@ function Chat() {
         const summary = result.filesWritten
           .map((f) => `${f.path} (${f.bytesWritten} bytes)`)
           .join(", ");
-        setPlanStatus(`Applied: ${summary}`);
+
+        if (result.nextBatch) {
+          setPlanStatus(`Applied: ${summary} — next batch ready for review`);
+          setPendingPlan(result.nextBatch);
+        } else if (result.campaignComplete) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `All ${result.totalBatches} batches applied. Files written: ${summary}` }
+          ]);
+          setPlanStatus("");
+        } else {
+          setPlanStatus(`Applied: ${summary}`);
+        }
       } else {
         setPlanStatus(`Apply failed at ${result.reason}`);
       }
