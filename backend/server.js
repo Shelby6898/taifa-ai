@@ -13,6 +13,7 @@ const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
 const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
 const { stripCodeFences } = require("./stripCodeFences");
+const { lenientJsonParse } = require("./lenientJsonParse");
 const { parseFixCommand } = require("./fixCommandParser");
 const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { parseDocumentCommand } = require("./documentCommandParser");
@@ -84,7 +85,7 @@ async function generateBatchPlan({ description, completedFiles, blueprint }) {
   const fullIndex = formatFullIndex(description);
   const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
   const cleanedPlan = stripCodeFences(rawPlan);
-  const parsedFiles = JSON.parse(cleanedPlan);
+  const parsedFiles = lenientJsonParse(cleanedPlan);
 
   if (!Array.isArray(parsedFiles)) {
     throw new Error("Generated plan was not a JSON array");
@@ -867,7 +868,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           success: true,
           action: "requirements_summary",
           summary: revisedDescription,
-          message: "Updated. Does this accurately capture your requirements? Reply \"approve\" to continue, or describe another change."
+          message: "Updated. Does this accurately capture your requirements? Reply \"approve\" to continue, or tell me what to add or change (for example: \"also add a mobile app\" or \"remove the tagging feature\")."
         });
       }
 
@@ -878,13 +879,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         try {
           const rawBlueprint = await generateBlueprint(enrichedDescription);
           const cleanedBlueprint = stripCodeFences(rawBlueprint);
-          const blueprint = JSON.parse(cleanedBlueprint);
+          const blueprint = lenientJsonParse(cleanedBlueprint);
           beginBlueprintConfirmation({ blueprint });
           return res.json({
             success: true,
             action: "architecture_blueprint",
             blueprint,
-            message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or describe a change."
+            message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
           });
         } catch (err) {
           console.error("Blueprint generation failed, proceeding without it:", err.message);
@@ -912,13 +913,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       try {
         const rawBlueprint = await generateBlueprint(finalDescription);
         const cleanedBlueprint = stripCodeFences(rawBlueprint);
-        const blueprint = JSON.parse(cleanedBlueprint);
+        const blueprint = lenientJsonParse(cleanedBlueprint);
         beginBlueprintConfirmation({ blueprint });
         return res.json({
           success: true,
           action: "architecture_blueprint",
           blueprint,
-          message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or describe a change."
+          message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
         });
       } catch (err) {
         console.error("Blueprint generation failed, proceeding without it:", err.message);
@@ -926,21 +927,38 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         return generateAndReturnPlan(finalDescription, res);
       }
     }
-
     if (phase === "blueprint") {
-      const enrichedDescription = getEnrichedDescription();
-      const blueprint = getBlueprint();
-      let finalDescription;
+      if (!isConfirmation) {
+        const correctedDescription = getEnrichedDescription() + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
+        setEnrichedDescription(correctedDescription);
 
-      if (isConfirmation) {
-        finalDescription = enrichedDescription + "\n\nAgreed architecture (technology choices below are binding, not suggestions):\n" + JSON.stringify(blueprint);
-      } else {
-        finalDescription = enrichedDescription + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
+        try {
+          const rawBlueprint = await generateBlueprint(correctedDescription);
+          const cleanedBlueprint = stripCodeFences(rawBlueprint);
+          const blueprint = lenientJsonParse(cleanedBlueprint);
+          beginBlueprintConfirmation({ blueprint });
+          return res.json({
+            success: true,
+            action: "architecture_blueprint",
+            blueprint,
+            message: "Updated. Here's the revised architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
+          });
+        } catch (err) {
+          console.error("Blueprint regeneration failed, proceeding without further revision:", err.message);
+          clearClarification();
+          return generateAndReturnPlan(correctedDescription, res);
+        }
       }
 
+      const enrichedDescription = getEnrichedDescription();
+      const blueprint = getBlueprint();
+      const finalDescription = enrichedDescription + "\n\nAgreed architecture (technology choices below are binding, not suggestions):\n" + JSON.stringify(blueprint);
+
       clearClarification();
-      return generateAndReturnPlan(finalDescription, res, isConfirmation ? blueprint : null);
+      return generateAndReturnPlan(finalDescription, res, blueprint);
     }
+
+
 
     const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
     const skipped = skipPattern.test(trimmedPrompt);
@@ -957,7 +975,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         success: true,
         action: "requirements_summary",
         summary,
-        message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or describe a change."
+        message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or tell me what to add or change (for example: \"also add a mobile app\" or \"remove the tagging feature\")."
       });
     }
 
