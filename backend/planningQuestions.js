@@ -12,7 +12,7 @@
 const FIXED_PLANNING_QUESTIONS = [
   {
     tag: "users",
-    text: "Who are the primary users of this (for example: tenants, property owners, agents, admins)?"
+    text: "Who are the primary users of this (for example: general public, internal team members, specific customer segments, administrators)?"
   },
   {
     tag: "features",
