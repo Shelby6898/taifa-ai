@@ -865,6 +865,29 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     const phase = getPhase();
     const trimmedPrompt = prompt.trim();
     const confirmPattern = /^(yes|yep|yeah|correct|looks good|proceed|go ahead|that'?s right|sounds good|confirmed|ok|okay|approve)\b/i;
+
+    const looksLikeNewPlanCommand = /^plan:\s*/i.test(trimmedPrompt) || /^execute plan:\s*/i.test(trimmedPrompt);
+    const looksLikeCancel = /^cancel$/i.test(trimmedPrompt);
+
+    if (looksLikeCancel) {
+      const cancelledDescription = getPendingClarification().description;
+      clearClarification();
+      return res.json({
+        success: true,
+        action: "clarification_cancelled",
+        message: "Cancelled the pending clarification for \"" + cancelledDescription + "\". You can start a new plan: request now."
+      });
+    }
+
+    if (looksLikeNewPlanCommand) {
+      const pending = getPendingClarification();
+      return res.status(409).json({
+        success: false,
+        action: "plan_rejected",
+        reason: "You have a clarification session already in progress for \"" + pending.description + "\". Answer the current question, or reply \"cancel\" to abandon it and start something new."
+      });
+    }
+
     const isConfirmation = confirmPattern.test(trimmedPrompt);
 
     if (phase === "summary") {
