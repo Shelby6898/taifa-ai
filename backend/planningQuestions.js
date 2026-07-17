@@ -41,3 +41,22 @@ const FIXED_PLANNING_QUESTIONS = [
 ];
 
 module.exports = { FIXED_PLANNING_QUESTIONS };
+
+// Shorter set used when project memory already has established facts
+// about this project (tech stack, platform, security approach, etc.)
+// — asking the full 7-question discovery framework again for every
+// incremental feature addition to an existing project is redundant
+// and tedious. Only genuinely new information gets asked; everything
+// else is pulled from memory and folded into the description directly.
+const SHORT_PLANNING_QUESTIONS = [
+  {
+    tag: "features",
+    text: "What does this addition need to do?"
+  },
+  {
+    tag: "success",
+    text: "What does success look like for this addition — what should users be able to do?"
+  }
+];
+
+module.exports.SHORT_PLANNING_QUESTIONS = SHORT_PLANNING_QUESTIONS;

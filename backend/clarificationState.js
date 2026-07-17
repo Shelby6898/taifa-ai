@@ -20,7 +20,12 @@ function getPhase() {
 // model call. Fixed, deterministic question set — no model involved
 // in deciding what to ask, same reliability principle as campaign
 // tracking in planState.js.
-function startClarification({ description, questions }) {
+//
+// memoryContext: optional string of established project facts (see
+// projectMemory.js). Kept as its own field rather than concatenated
+// into description, so the Requirements Summary can display it
+// clearly instead of it bleeding awkwardly into the "Project:" line.
+function startClarification({ description, questions, memoryContext }) {
   const id = crypto.randomBytes(8).toString("hex");
 
   pendingClarification = {
@@ -33,7 +38,8 @@ function startClarification({ description, questions }) {
     summaryText: null,
     enrichedDescription: null,
     relevantFiles: null,
-    blueprint: null
+    blueprint: null,
+    memoryContext: memoryContext || null
   };
 
   return pendingClarification;
@@ -65,6 +71,10 @@ function getCurrentQuestion() {
 // Deterministic — builds a labeled summary directly from the tagged
 // answers rather than asking the model to summarize, so this step
 // can't drift or hallucinate a requirement that wasn't actually given.
+// Only prints a line for a tag that was actually asked and answered —
+// omitting untouched tags instead of printing "(not specified)" for
+// every field the short question set (used when project memory
+// already exists) never asks about.
 function buildRequirementsSummary() {
   if (!pendingClarification) return "";
 
@@ -73,17 +83,32 @@ function buildRequirementsSummary() {
     byTag[a.tag] = a.skipped ? "(no preference given — best judgment)" : a.answer;
   });
 
-  const lines = [
-    `Project: ${pendingClarification.description}`,
-    "",
-    `Users: ${byTag.users || "(not specified)"}`,
-    `MVP features: ${byTag.features || "(not specified)"}`,
-    `Platforms: ${byTag.platforms || "(not specified)"}`,
-    `Technology preferences: ${byTag.tech || "(not specified)"}`,
-    `Expected scale: ${byTag.scale || "(not specified)"}`,
-    `Security requirements: ${byTag.security || "(not specified)"}`,
-    `Success criteria: ${byTag.success || "(not specified)"}`
-  ];
+  const labels = {
+    users: "Users",
+    features: "MVP features",
+    platforms: "Platforms",
+    tech: "Technology preferences",
+    scale: "Expected scale",
+    security: "Security requirements",
+    success: "Success criteria"
+  };
+
+  const lines = [];
+
+  if (pendingClarification.memoryContext) {
+    lines.push("Established project context (from memory):");
+    lines.push(pendingClarification.memoryContext.trim());
+    lines.push("");
+  }
+
+  lines.push(`Project: ${pendingClarification.description}`);
+  lines.push("");
+
+  Object.keys(labels).forEach((tag) => {
+    if (byTag[tag] !== undefined) {
+      lines.push(`${labels[tag]}: ${byTag[tag]}`);
+    }
+  });
 
   pendingClarification.summaryText = lines.join("\n");
   return pendingClarification.summaryText;

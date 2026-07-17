@@ -29,7 +29,7 @@ const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
 const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
-const { FIXED_PLANNING_QUESTIONS } = require("./planningQuestions");
+const { FIXED_PLANNING_QUESTIONS, SHORT_PLANNING_QUESTIONS } = require("./planningQuestions");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
@@ -728,15 +728,22 @@ async function handlePlanCommand(planCommand, res) {
       reason: "A clarification session is already in progress. Answer the pending question before starting something new."
     });
   }
-  startClarification({ description: planCommand.description, questions: FIXED_PLANNING_QUESTIONS });
+  const memoryBlock = formatMemoryBlock();
+  const hasMemory = memoryBlock.length > 0;
+  const questions = hasMemory ? SHORT_PLANNING_QUESTIONS : FIXED_PLANNING_QUESTIONS;
+  const memoryContext = hasMemory ? memoryBlock : null;
+
+  startClarification({ description: planCommand.description, questions, memoryContext });
 
   return res.json({
     success: true,
     action: "clarification_question",
     question: getCurrentQuestion(),
     questionNumber: 1,
-    totalQuestions: FIXED_PLANNING_QUESTIONS.length
+    totalQuestions: questions.length,
+    usingProjectMemory: hasMemory
   });
+
 
 }
 
@@ -1275,6 +1282,25 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
   }
 });
 
+// Extracts the agreed architecture from a plan's description (if one
+// exists — a plan created via execute plan: won't have one) and saves
+// it to persistent project memory, so future plan: requests for the
+// same project can skip re-asking about tech stack, platform, and
+// security that's already established, instead of treating every
+// incremental feature as a brand-new project from scratch.
+function saveArchitectureToMemory(description) {
+  const match = description.match(/Agreed architecture \(technology choices below are binding, not suggestions\):\s*(\{[\s\S]*\})/);
+  if (!match) return;
+
+  try {
+    const blueprint = lenientJsonParse(match[1]);
+    const fact = `Established project architecture: ${blueprint.frontend} frontend, ${blueprint.backend} backend, ${blueprint.database} database, ${blueprint.authentication} authentication.`;
+    addFact(fact);
+  } catch (err) {
+    console.error("Could not save architecture to project memory:", err.message);
+  }
+}
+
 app.post("/api/plan/apply", requireAuth, async (req, res) => {
   const { planId } = req.body;
 
@@ -1329,6 +1355,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
 
   const appliedPaths = results.map((r) => r.path);
   clearPlan();
+  saveArchitectureToMemory(plan.description);
 
   if (!hasActiveCampaign()) {
     return res.json({
