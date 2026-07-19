@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { execFile } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
 const { WORKSPACE_DIR } = require("./fileIndexer");
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
@@ -45,6 +45,9 @@ function truncateOutput(text) {
 // workspace. Uses execFile with a fixed command and argument list —
 // never a shell string — so there is no injection surface regardless
 // of what's in package.json or anywhere else in the workspace.
+//
+// This is the whole-project "run tests" command, distinct from the
+// per-file mechanical verification functions below.
 function runTests() {
   return new Promise((resolve) => {
     const projectDir = findTestableProject(WORKSPACE_DIR);
@@ -75,4 +78,103 @@ function runTests() {
   });
 }
 
-module.exports = { runTests, findTestableProject };
+// Given a source file path, find its sibling test file using the
+// convention used throughout this codebase: X.js -> X.test.js in the
+// same directory. Returns null if no such file exists.
+function findTestFile(resolvedPath) {
+  if (resolvedPath.endsWith(".test.js")) return null;
+  const ext = path.extname(resolvedPath);
+  const base = resolvedPath.slice(0, -ext.length);
+  const candidate = `${base}.test.js`;
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+// Mechanically verifies a proposed file change by actually writing it
+// to disk temporarily, running the real test suite against it, and
+// restoring the original content afterward -- regardless of outcome.
+//
+// This replaces asking the model to judge its own output (self-review)
+// with an independent, deterministic check: either the existing tests
+// pass against the new code, or they don't. No interpretation involved.
+function runTestsAgainstProposal(resolvedPath, proposedContent) {
+  const testFilePath = findTestFile(resolvedPath);
+
+  if (!testFilePath) {
+    return { hasTests: false, skippedReason: "No test file exists for this source file." };
+  }
+
+  let originalContent = null;
+  let fileExisted = false;
+  try {
+    originalContent = fs.readFileSync(resolvedPath, "utf-8");
+    fileExisted = true;
+  } catch (err) {
+    fileExisted = false;
+  }
+
+  try {
+    fs.writeFileSync(resolvedPath, proposedContent, "utf-8");
+
+    let output = "";
+    let passed = true;
+    try {
+      output = execFileSync("node", ["--test", testFilePath], {
+        encoding: "utf-8",
+        timeout: 30000
+      });
+    } catch (err) {
+      passed = false;
+      output = (err.stdout || "") + (err.stderr || "");
+    }
+
+    return { hasTests: true, passed, testFilePath, output };
+  } finally {
+    if (fileExisted) {
+      fs.writeFileSync(resolvedPath, originalContent, "utf-8");
+    } else {
+      try { fs.unlinkSync(resolvedPath); } catch (e) { /* nothing to clean up */ }
+    }
+  }
+}
+
+// For newly generated TEST files specifically: write the proposed test
+// content to disk at its real path and actually execute it with
+// node --test, then restore whatever was there before (or remove it if
+// the test file didn't already exist). Unlike runTestsAgainstProposal,
+// there's no "sibling file" lookup here -- the resolvedPath IS the test
+// file being generated, and we're checking whether it actually runs and
+// passes against the real, already-existing source file.
+function runGeneratedTestFile(resolvedTestPath) {
+  let originalContent = null;
+  let fileExisted = false;
+  try {
+    originalContent = fs.readFileSync(resolvedTestPath, "utf-8");
+    fileExisted = true;
+  } catch (err) {
+    fileExisted = false;
+  }
+
+  try {
+    let output = "";
+    let passed = true;
+    try {
+      output = execFileSync("node", ["--test", resolvedTestPath], {
+        encoding: "utf-8",
+        timeout: 30000
+      });
+    } catch (err) {
+      passed = false;
+      output = (err.stdout || "") + (err.stderr || "");
+    }
+
+    return { hasTests: true, passed, output };
+  } finally {
+    if (fileExisted) {
+      fs.writeFileSync(resolvedTestPath, originalContent, "utf-8");
+    } else {
+      try { fs.unlinkSync(resolvedTestPath); } catch (e) { /* nothing to clean up */ }
+    }
+  }
+}
+
+module.exports = { runTests, findTestableProject, runTestsAgainstProposal, runGeneratedTestFile };

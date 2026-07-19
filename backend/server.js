@@ -209,8 +209,19 @@ async function handleWriteCommand(parsedCommand, res) {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
-    const selfReviewResult = parseSelfReview(rawSelfReview);
+    const { runTestsAgainstProposal } = require("./testRunner");
+    const testCheck = runTestsAgainstProposal(safetyCheck.resolvedPath, cleanedContent);
+
+    if (testCheck.hasTests && !testCheck.passed) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "The existing test suite fails against this proposed change.",
+        testCheck,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult
+      });
+    }
 
     return res.json({
       success: true,
@@ -224,7 +235,7 @@ async function handleWriteCommand(parsedCommand, res) {
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
-      selfReview: selfReviewResult,
+      testCheck,
     });
   } catch (err) {
     console.error("Content generation failed:", err.message);
@@ -308,10 +319,39 @@ async function handleWriteTestsCommand(targetPath, res) {
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
     const importResult = checkImports(cleanedContent, testSafetyCheck.resolvedPath);
+
+    if (!syntaxResult.valid || importResult.hasMissing) {
+      return res.json({
+        success: true,
+        action: "test_generation_refused",
+        message: !syntaxResult.valid
+          ? "Refusing to propose this generated test — syntax error: " + syntaxResult.message
+          : "Refusing to propose this generated test — it references a file or export that doesn't exist.",
+        syntaxCheck: syntaxResult,
+        importCheck: importResult
+      });
+    }
+
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
-    const selfReviewResult = parseSelfReview(rawSelfReview);
+    const { runGeneratedTestFile } = require("./testRunner");
+    // Write the proposed test content to disk temporarily and actually
+    // run it, to check that the newly generated test itself passes
+    // against the real, unchanged source file it's meant to test.
+    const fsSync = require("fs");
+    fsSync.writeFileSync(testSafetyCheck.resolvedPath, cleanedContent, "utf-8");
+    const testCheck = runGeneratedTestFile(testSafetyCheck.resolvedPath);
+
+    if (testCheck.hasTests && !testCheck.passed) {
+      return res.json({
+        success: true,
+        action: "test_generation_refused",
+        message: "The generated test file does not actually pass when run against the real source file.",
+        testCheck,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult
+      });
+    }
 
     return res.json({
       success: true,
@@ -325,7 +365,7 @@ async function handleWriteTestsCommand(targetPath, res) {
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
-      selfReview: selfReviewResult,
+      testCheck,
       isTestGeneration: true
     });
   } catch (err) {
@@ -404,8 +444,19 @@ async function handleFixCommand(fixCommand, res) {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
-    const selfReviewResult = parseSelfReview(rawSelfReview);
+    const { runTestsAgainstProposal } = require("./testRunner");
+    const testCheck = runTestsAgainstProposal(safetyCheck.resolvedPath, cleanedContent);
+
+    if (testCheck.hasTests && !testCheck.passed) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "The existing test suite fails against this proposed fix.",
+        testCheck,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult
+      });
+    }
 
     return res.json({
       success: true,
@@ -419,7 +470,7 @@ async function handleFixCommand(fixCommand, res) {
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
-      selfReview: selfReviewResult,
+      testCheck,
       locationMethod
     });
   } catch (err) {
@@ -1271,8 +1322,12 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath, batchSiblingPaths);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
-    const rawSelfReview = await generateSelfReview(cleanedContent, { syntaxCheck: syntaxResult, importCheck: importResult, lintCheck: lintResult });
-    const selfReviewResult = parseSelfReview(rawSelfReview);
+    const { runTestsAgainstProposal } = require("./testRunner");
+    const testCheck = runTestsAgainstProposal(safetyCheck.resolvedPath, cleanedContent);
+    // Note: unlike the single-file routes, this does not hard-refuse on
+    // failure -- it surfaces the real test result so a human reviewing
+    // the batch diff can see it, without risking disruption to the
+    // multi-file campaign loop's control flow.
 
       enrichedFiles.push({
         path: file.path,
@@ -1282,7 +1337,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
-      selfReview: selfReviewResult,
+      testCheck,
         mode: fileExists ? "edit" : "write"
       });
     }
