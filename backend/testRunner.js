@@ -89,6 +89,89 @@ function findTestFile(resolvedPath) {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
+// Walks upward from a file's directory looking for the nearest
+// package.json, to determine which project (and therefore which test
+// runner) a given test file actually belongs to.
+function findNearestPackageJson(startDir) {
+  let dir = startDir;
+  while (true) {
+    const pkgPath = path.join(dir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      try {
+        return { dir, pkg: JSON.parse(fs.readFileSync(pkgPath, "utf-8")) };
+      } catch (err) {
+        return null; // malformed package.json -- don't guess
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // reached filesystem root
+    dir = parent;
+  }
+}
+
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Determines the correct test command for a given test file by
+// checking whether its nearest package.json declares react-scripts
+// (a CRA/Jest project) versus a plain Node project using node:test.
+// Running the wrong runner against the wrong kind of test file produces
+// a false-negative refusal -- e.g. node --test cannot parse Jest's
+// jest.fn()/jest.mock() APIs or CRA's ESM import syntax, and would
+// incorrectly report a perfectly valid test file as failing.
+function buildTestCommand(testFilePath) {
+  const nearest = findNearestPackageJson(path.dirname(testFilePath));
+  const deps = nearest ? { ...(nearest.pkg.dependencies || {}), ...(nearest.pkg.devDependencies || {}) } : {};
+  const isReactScriptsProject = !!deps["react-scripts"];
+
+  if (isReactScriptsProject) {
+    const pattern = escapeRegExp(path.basename(testFilePath));
+    return {
+      command: "npx",
+      args: ["react-scripts", "test", `--testPathPattern=${pattern}`, "--watchAll=false"],
+      cwd: nearest.dir,
+      env: {
+        ...process.env,
+        CI: "true",
+        NODE_OPTIONS: "--openssl-legacy-provider"
+      }
+    };
+  }
+
+  return {
+    command: "node",
+    args: ["--test", testFilePath],
+    cwd: undefined,
+    env: process.env
+  };
+}
+
+// Actually executes a test file with the correct runner for its
+// project, returning { passed, output }. Exit code is the source of
+// truth for pass/fail -- more robust than parsing either runner's
+// human-readable summary text, since Jest and node:test format their
+// output differently.
+function runTestFile(testFilePath) {
+  const { command, args, cwd, env } = buildTestCommand(testFilePath);
+
+  let output = "";
+  let passed = true;
+  try {
+    output = execFileSync(command, args, {
+      cwd,
+      env,
+      encoding: "utf-8",
+      timeout: 60000 // Jest/CRA cold starts are slower than node:test
+    });
+  } catch (err) {
+    passed = false;
+    output = (err.stdout || "") + (err.stderr || "");
+  }
+
+  return { passed, output };
+}
+
 // Mechanically verifies a proposed file change by actually writing it
 // to disk temporarily, running the real test suite against it, and
 // restoring the original content afterward -- regardless of outcome.
@@ -114,19 +197,7 @@ function runTestsAgainstProposal(resolvedPath, proposedContent) {
 
   try {
     fs.writeFileSync(resolvedPath, proposedContent, "utf-8");
-
-    let output = "";
-    let passed = true;
-    try {
-      output = execFileSync("node", ["--test", testFilePath], {
-        encoding: "utf-8",
-        timeout: 30000
-      });
-    } catch (err) {
-      passed = false;
-      output = (err.stdout || "") + (err.stderr || "");
-    }
-
+    const { passed, output } = runTestFile(testFilePath);
     return { hasTests: true, passed, testFilePath, output };
   } finally {
     if (fileExisted) {
@@ -138,12 +209,12 @@ function runTestsAgainstProposal(resolvedPath, proposedContent) {
 }
 
 // For newly generated TEST files specifically: write the proposed test
-// content to disk at its real path and actually execute it with
-// node --test, then restore whatever was there before (or remove it if
-// the test file didn't already exist). Unlike runTestsAgainstProposal,
-// there's no "sibling file" lookup here -- the resolvedPath IS the test
-// file being generated, and we're checking whether it actually runs and
-// passes against the real, already-existing source file.
+// content to disk at its real path and actually execute it, then
+// restore whatever was there before (or remove it if the test file
+// didn't already exist). Unlike runTestsAgainstProposal, there's no
+// "sibling file" lookup here -- the resolvedPath IS the test file being
+// generated, and we're checking whether it actually runs and passes
+// against the real, already-existing source file.
 function runGeneratedTestFile(resolvedTestPath) {
   let originalContent = null;
   let fileExisted = false;
@@ -155,18 +226,7 @@ function runGeneratedTestFile(resolvedTestPath) {
   }
 
   try {
-    let output = "";
-    let passed = true;
-    try {
-      output = execFileSync("node", ["--test", resolvedTestPath], {
-        encoding: "utf-8",
-        timeout: 30000
-      });
-    } catch (err) {
-      passed = false;
-      output = (err.stdout || "") + (err.stderr || "");
-    }
-
+    const { passed, output } = runTestFile(resolvedTestPath);
     return { hasTests: true, passed, output };
   } finally {
     if (fileExisted) {
