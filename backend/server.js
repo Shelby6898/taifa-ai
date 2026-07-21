@@ -223,6 +223,21 @@ async function handleWriteCommand(parsedCommand, res) {
       });
     }
 
+    const { detectRouteRegressions } = require("./regressionChecker");
+    const regressionWarnings = detectRouteRegressions(fileExists ? existingContent : null, cleanedContent);
+
+    if (regressionWarnings.length > 0) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "This change appears to silently remove or weaken an existing route.",
+        regressionWarnings,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        testCheck
+      });
+    }
+
     return res.json({
       success: true,
       action: "propose_write",
@@ -455,6 +470,21 @@ async function handleFixCommand(fixCommand, res) {
         testCheck,
         syntaxCheck: syntaxResult,
         importCheck: importResult
+      });
+    }
+
+    const { detectRouteRegressions } = require("./regressionChecker");
+    const regressionWarnings = detectRouteRegressions(existingContent, cleanedContent);
+
+    if (regressionWarnings.length > 0) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "This fix appears to silently remove or weaken an existing route.",
+        regressionWarnings,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        testCheck
       });
     }
 
@@ -1329,6 +1359,9 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     // the batch diff can see it, without risking disruption to the
     // multi-file campaign loop's control flow.
 
+    const { detectRouteRegressions } = require("./regressionChecker");
+    const regressionWarnings = detectRouteRegressions(fileExists ? existingContent : null, cleanedContent);
+
       enrichedFiles.push({
         path: file.path,
         description: file.description,
@@ -1338,6 +1371,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       importCheck: importResult,
       lintCheck: lintResult,
       testCheck,
+      regressionWarnings,
         mode: fileExists ? "edit" : "write"
       });
     }
