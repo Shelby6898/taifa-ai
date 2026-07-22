@@ -139,6 +139,34 @@ function Chat() {
             ...prev,
             { role: "assistant", content: `🚫 ${data.message}` }
           ]);
+        } else if (data.action === "generation_refused") {
+          const detailLines = [`🚫 ${data.reason}`];
+
+          if (data.regressionWarnings && data.regressionWarnings.length > 0) {
+            detailLines.push("", "Possible regressions:");
+            data.regressionWarnings.forEach((w) => detailLines.push(`- ${w}`));
+          }
+
+          if (data.undeclaredDependencies && data.undeclaredDependencies.length > 0) {
+            detailLines.push("", "Undeclared dependencies:");
+            data.undeclaredDependencies.forEach((d) => detailLines.push(`- ${d}`));
+          }
+
+          if (data.packageVersionCheck && data.packageVersionCheck.invalidVersions && data.packageVersionCheck.invalidVersions.length > 0) {
+            detailLines.push("", "Invalid package versions:");
+            data.packageVersionCheck.invalidVersions.forEach((v) =>
+              detailLines.push(`- ${v.name}@${v.exactVersion} does not exist on the npm registry`)
+            );
+          }
+
+          if (data.testCheck && data.testCheck.hasTests && !data.testCheck.passed) {
+            detailLines.push("", "Test output:", data.testCheck.output || "(no output captured)");
+          }
+
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: detailLines.join("\n") }
+          ]);
         } else if (data.action === "action_rejected") {
           setMessages((prev) => [
             ...prev,
@@ -418,6 +446,18 @@ function Chat() {
           {pendingWrite.isDocumentation && (
             <p className="panel-note panel-note-warn">
               ai-generated documentation — technical claims may be inaccurate. verify against the file content below before approving.
+            </p>
+          )}
+          {pendingWrite.testCheck && pendingWrite.testCheck.hasTests && (
+            <p className={`panel-note ${pendingWrite.testCheck.passed ? "panel-note-ok" : "panel-note-warn"}`}>
+              {pendingWrite.testCheck.passed
+                ? "✅ existing tests pass against this change"
+                : "⚠️ existing tests fail against this change — review before approving"}
+            </p>
+          )}
+          {pendingWrite.testCheck && !pendingWrite.testCheck.hasTests && (
+            <p className="panel-note panel-note-warn">
+              ⚠️ no test file found for this source file — this change was not mechanically verified
             </p>
           )}
           <div className="diff-pair">
