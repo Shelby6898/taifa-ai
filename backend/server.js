@@ -238,6 +238,38 @@ async function handleWriteCommand(parsedCommand, res) {
       });
     }
 
+    const { checkUndeclaredDependencies, checkPackageVersionsExist } = require("./packageJsonChecker");
+    const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
+
+    if (undeclaredDependencies.length > 0) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "This change requires a package that isn't declared in package.json: " + undeclaredDependencies.join(", "),
+        undeclaredDependencies,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        testCheck
+      });
+    }
+
+    let packageVersionCheck = null;
+    if (safetyCheck.resolvedPath.endsWith("package.json")) {
+      packageVersionCheck = await checkPackageVersionsExist(cleanedContent);
+      if (packageVersionCheck.invalidVersions && packageVersionCheck.invalidVersions.length > 0) {
+        return res.json({
+          success: true,
+          action: "generation_refused",
+          reason: "This package.json specifies a version that doesn't exist on the npm registry: " +
+            packageVersionCheck.invalidVersions.map(v => `${v.name}@${v.exactVersion}`).join(", "),
+          packageVersionCheck,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult,
+          testCheck
+        });
+      }
+    }
+
     return res.json({
       success: true,
       action: "propose_write",
@@ -368,6 +400,21 @@ async function handleWriteTestsCommand(targetPath, res) {
       });
     }
 
+    const { checkUndeclaredDependencies } = require("./packageJsonChecker");
+    const undeclaredDependencies = checkUndeclaredDependencies(testSafetyCheck.resolvedPath, cleanedContent);
+
+    if (undeclaredDependencies.length > 0) {
+      return res.json({
+        success: true,
+        action: "test_generation_refused",
+        message: "The generated test requires a package that isn't declared in package.json: " + undeclaredDependencies.join(", "),
+        undeclaredDependencies,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        testCheck
+      });
+    }
+
     return res.json({
       success: true,
       action: "propose_write",
@@ -486,6 +533,38 @@ async function handleFixCommand(fixCommand, res) {
         importCheck: importResult,
         testCheck
       });
+    }
+
+    const { checkUndeclaredDependencies, checkPackageVersionsExist } = require("./packageJsonChecker");
+    const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
+
+    if (undeclaredDependencies.length > 0) {
+      return res.json({
+        success: true,
+        action: "generation_refused",
+        reason: "This fix requires a package that isn't declared in package.json: " + undeclaredDependencies.join(", "),
+        undeclaredDependencies,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        testCheck
+      });
+    }
+
+    let packageVersionCheck = null;
+    if (safetyCheck.resolvedPath.endsWith("package.json")) {
+      packageVersionCheck = await checkPackageVersionsExist(cleanedContent);
+      if (packageVersionCheck.invalidVersions && packageVersionCheck.invalidVersions.length > 0) {
+        return res.json({
+          success: true,
+          action: "generation_refused",
+          reason: "This package.json specifies a version that doesn't exist on the npm registry: " +
+            packageVersionCheck.invalidVersions.map(v => `${v.name}@${v.exactVersion}`).join(", "),
+          packageVersionCheck,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult,
+          testCheck
+        });
+      }
     }
 
     return res.json({
@@ -1362,6 +1441,9 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     const { detectRouteRegressions } = require("./regressionChecker");
     const regressionWarnings = detectRouteRegressions(fileExists ? existingContent : null, cleanedContent);
 
+    const { checkUndeclaredDependencies } = require("./packageJsonChecker");
+    const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
+
       enrichedFiles.push({
         path: file.path,
         description: file.description,
@@ -1372,6 +1454,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       lintCheck: lintResult,
       testCheck,
       regressionWarnings,
+      undeclaredDependencies,
         mode: fileExists ? "edit" : "write"
       });
     }
