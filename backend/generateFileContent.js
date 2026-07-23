@@ -20,7 +20,20 @@ ${existingContent}
 
 Instruction: ${instruction}${finalReminder}
 
-Output ONLY the complete updated file content. Do not include any explanation, comments about what you changed, or markdown code fences. Output raw code only, starting from the first line of the file.`;
+Do NOT output the entire file. Instead, output one or more SEARCH/REPLACE blocks describing only the specific change(s) needed, in exactly this format:
+
+<<<<<<< SEARCH
+(exact snippet of code copied verbatim from the current file content above, including exact whitespace and indentation)
+=======
+(the new code that should replace it)
+>>>>>>> REPLACE
+
+Rules:
+- Each SEARCH block must be copied EXACTLY, character for character, from the current file content shown above. Do not paraphrase, reformat, or fix whitespace -- copy it verbatim.
+- Keep each SEARCH block as short as possible while still being unique enough to identify only ONE location in the file. A few lines is usually enough. Do not include unrelated surrounding code that isn't changing.
+- Only include SEARCH/REPLACE blocks for the parts of the file that actually need to change. Do NOT reproduce, repeat, or rewrite any part of the file that isn't changing -- leave it out entirely.
+- If multiple separate parts of the file need to change, output multiple SEARCH/REPLACE blocks, one after another.
+- Output ONLY the SEARCH/REPLACE block(s). No explanation, no markdown code fences, no other text before or after.`;
   }
 
   return `You are creating a new code file at path "${targetPath}".
@@ -42,7 +55,19 @@ ${errorText}
 
 Before producing the fix, identify what specifically in the code above causes this error (for example: a missing null/undefined check, a missing required field, an incorrect variable reference, a type mismatch). The fix must make a REAL functional change that prevents this specific error from happening again — not just a cosmetic change like moving a comment or reformatting a line.
 
-Output ONLY the complete fixed file content. Do not include any explanation of the bug, what you changed, or markdown code fences. Output raw code only, starting from the first line of the file. If the file content above does not appear to actually be the cause of this error, make your best reasonable attempt at a fix anyway.`;
+Do NOT output the entire file. Instead, output one or more SEARCH/REPLACE blocks describing only the specific fix needed, in exactly this format:
+
+<<<<<<< SEARCH
+(exact snippet of code copied verbatim from the current file content above, including exact whitespace and indentation)
+=======
+(the corrected code that should replace it)
+>>>>>>> REPLACE
+
+Rules:
+- Each SEARCH block must be copied EXACTLY, character for character, from the current file content shown above.
+- Keep each SEARCH block as short as possible while still being unique enough to identify only ONE location in the file.
+- Only include SEARCH/REPLACE blocks for the specific lines that need to change to fix this error. Do NOT reproduce or rewrite any part of the file that isn't part of the fix.
+- Output ONLY the SEARCH/REPLACE block(s). No explanation, no markdown code fences, no other text. If the file content above does not appear to actually be the cause of this error, make your best reasonable attempt at a fix anyway, still in SEARCH/REPLACE format.`;
 }
 
 function buildDocumentationPrompt({ fullIndex }) {
@@ -126,6 +151,38 @@ async function generateClarifyingQuestions(description) {
   return response.data.response;
 }
 
+// Edits and fixes ask the model for scoped SEARCH/REPLACE blocks rather
+// than a full-file rewrite (see buildGenerationPrompt/buildFixPrompt),
+// then mechanically apply those blocks to the real existing content
+// here. This means the model can only ever change the exact snippets
+// it names -- it structurally cannot silently drop or alter unrelated
+// code elsewhere in the file, which full-file regeneration repeatedly
+// did in manual testing. If the blocks don't parse, or don't match the
+// real file content exactly once, this throws rather than guessing --
+// callers already catch generation errors and surface them clearly.
+function applyScopedEdit(rawModelOutput, existingContent) {
+  const { parseSearchReplaceBlocks, applySearchReplaceBlocks } = require("./searchReplaceParser");
+  const { stripCodeFences } = require("./stripCodeFences");
+
+  // Models sometimes wrap the whole set of SEARCH/REPLACE blocks in a
+  // single outer markdown fence despite instructions not to -- strip
+  // that first, using the same utility already used elsewhere for
+  // full-file generation, before attempting to parse blocks out of it.
+  const cleanedOutput = stripCodeFences(rawModelOutput);
+
+  const { blocks, parseError } = parseSearchReplaceBlocks(cleanedOutput);
+  if (parseError) {
+    throw new Error(`Scoped edit failed: ${parseError}`);
+  }
+
+  const result = applySearchReplaceBlocks(existingContent, blocks);
+  if (!result.success) {
+    throw new Error(`Scoped edit failed: ${result.reason}`);
+  }
+
+  return result.content;
+}
+
 async function generateFileContent(params) {
   const prompt = buildGenerationPrompt(params);
 
@@ -136,7 +193,13 @@ async function generateFileContent(params) {
     options: { num_predict: 1500 }
   });
 
-  return response.data.response;
+  const rawOutput = response.data.response;
+
+  if (params.mode === "edit" && params.existingContent) {
+    return applyScopedEdit(rawOutput, params.existingContent);
+  }
+
+  return rawOutput;
 }
 
 async function generateFix(params) {
@@ -149,7 +212,9 @@ async function generateFix(params) {
     options: { num_predict: 1500 }
   });
 
-  return response.data.response;
+  const rawOutput = response.data.response;
+
+  return applyScopedEdit(rawOutput, params.existingContent);
 }
 
 async function generateDocumentation(params) {
