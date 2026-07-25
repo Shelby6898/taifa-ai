@@ -1,7 +1,7 @@
 const axios = require("axios");
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
-const MODEL_NAME = "qwen2.5-coder-6k";
+const MODEL_NAME = "qwen2.5-coder:3b";
 
 function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext }) {
   const contextSection = projectContext
