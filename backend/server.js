@@ -195,14 +195,13 @@ async function handleWriteCommand(parsedCommand, res) {
   }
 
   try {
-    const rawGenerated = await generateFileContent({
+    const { content: cleanedContent, patchWarnings } = await generateFileContent({
       mode,
       targetPath,
       instruction,
       existingContent: fileExists ? existingContent : null
     });
 
-    const cleanedContent = stripCodeFences(rawGenerated);
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
@@ -279,6 +278,7 @@ async function handleWriteCommand(parsedCommand, res) {
       fileExists,
       before: fileExists ? existingContent : "",
       after: cleanedContent,
+      patchWarnings,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
@@ -493,13 +493,12 @@ async function handleFixCommand(fixCommand, res) {
   }
 
   try {
-    const rawGenerated = await generateFix({
+    const { content: cleanedContent, patchWarnings } = await generateFix({
       targetPath: relativePath,
       errorText,
       existingContent
     });
 
-    const cleanedContent = stripCodeFences(rawGenerated);
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
@@ -576,6 +575,7 @@ async function handleFixCommand(fixCommand, res) {
       fileExists: true,
       before: existingContent,
       after: cleanedContent,
+      patchWarnings,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,
@@ -1416,7 +1416,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         fileExists = false;
       }
 
-      const rawGenerated = await generateFileContent({
+      const { content: cleanedContent, patchWarnings } = await generateFileContent({
         mode: fileExists ? "edit" : "write",
         targetPath: file.path,
         instruction: file.description,
@@ -1424,7 +1424,6 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         existingContent: fileExists ? existingContent : null
       });
 
-      const cleanedContent = stripCodeFences(rawGenerated);
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
@@ -1449,6 +1448,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         description: file.description,
         before: fileExists ? existingContent : "",
         after: cleanedContent,
+        patchWarnings,
       syntaxCheck: syntaxResult,
       importCheck: importResult,
       lintCheck: lintResult,

@@ -20,12 +20,20 @@ ${existingContent}
 
 Instruction: ${instruction}${finalReminder}
 
-Do NOT output the entire file. Instead, output one or more SEARCH/REPLACE blocks describing only the specific change(s) needed, in exactly this format:
+Do NOT output the entire file. Instead, output one or more SEARCH/REPLACE blocks describing only the specific change(s) needed.
+
+Here is a complete, correctly formatted example. Study its exact shape before writing your own:
 
 <<<<<<< SEARCH
-(exact snippet of code copied verbatim from the current file content above, including exact whitespace and indentation)
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+});
 =======
-(the new code that should replace it)
+const loginRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 5,
+});
 >>>>>>> REPLACE
 
 Rules:
@@ -33,6 +41,8 @@ Rules:
 - Keep each SEARCH block as short as possible while still being unique enough to identify only ONE location in the file. A few lines is usually enough. Do not include unrelated surrounding code that isn't changing.
 - Only include SEARCH/REPLACE blocks for the parts of the file that actually need to change. Do NOT reproduce, repeat, or rewrite any part of the file that isn't changing -- leave it out entirely.
 - If multiple separate parts of the file need to change, output multiple SEARCH/REPLACE blocks, one after another.
+- Every block MUST end with the line ">>>>>>> REPLACE" exactly as shown in the example above. Do NOT close a block with a markdown code fence (three backticks) instead of ">>>>>>> REPLACE" -- a code fence is not a valid closing marker and your entire response will be rejected.
+- Do NOT wrap your SEARCH/REPLACE blocks in markdown code fences at all. Output the markers directly, exactly like the example above -- no code fences anywhere in your response.
 - Output ONLY the SEARCH/REPLACE block(s). No explanation, no markdown code fences, no other text before or after.`;
   }
 
@@ -164,6 +174,12 @@ function applyScopedEdit(rawModelOutput, existingContent) {
   const { parseSearchReplaceBlocks, applySearchReplaceBlocks } = require("./searchReplaceParser");
   const { stripCodeFences } = require("./stripCodeFences");
 
+  // Logged unconditionally (not just on failure) so that a scoped
+  // edit's actual behavior -- what the model produced, how it parsed,
+  // what the merge actually did -- is always inspectable after the
+  // fact, rather than only inferable from whether an error was thrown.
+  console.log("[scopedEdit] raw model output:\n" + rawModelOutput);
+
   // Models sometimes wrap the whole set of SEARCH/REPLACE blocks in a
   // single outer markdown fence despite instructions not to -- strip
   // that first, using the same utility already used elsewhere for
@@ -172,18 +188,46 @@ function applyScopedEdit(rawModelOutput, existingContent) {
 
   const { blocks, parseError } = parseSearchReplaceBlocks(cleanedOutput);
   if (parseError) {
+    console.log("[scopedEdit] parse failed: " + parseError);
     throw new Error(`Scoped edit failed: ${parseError}`);
   }
 
+  console.log(`[scopedEdit] parsed ${blocks.length} block(s):`);
+  blocks.forEach((b, i) => {
+    console.log(`[scopedEdit] block ${i + 1} SEARCH:\n${b.search}`);
+    console.log(`[scopedEdit] block ${i + 1} REPLACE:\n${b.replace}`);
+  });
+
   const result = applySearchReplaceBlocks(existingContent, blocks);
-  if (!result.success) {
-    throw new Error(`Scoped edit failed: ${result.reason}`);
+
+  if (result.noneSucceeded) {
+    const reasons = result.failedBlocks.map(b => b.reason).join("; ");
+    console.log("[scopedEdit] apply failed, no blocks matched: " + reasons);
+    throw new Error(`Scoped edit failed: ${reasons}`);
   }
 
-  return result.content;
+  let patchWarnings = [];
+  if (!result.allSucceeded) {
+    const reasons = result.failedBlocks.map(b => b.reason);
+    patchWarnings = reasons;
+    console.log(
+      `[scopedEdit] partial apply: ${result.appliedCount}/${result.totalBlocks} block(s) succeeded. ` +
+      `Skipped block(s): ${reasons.join("; ")}`
+    );
+    // Deliberate choice: proceed with the partially-patched content rather
+    // than discarding the blocks that DID apply cleanly. The existing
+    // syntax/import/lint/test/regression gates downstream will judge the
+    // resulting file on its actual merits -- this only decides whether a
+    // partial match is worth showing them at all.
+  } else {
+    console.log("[scopedEdit] merge succeeded, final content:\n" + result.content);
+  }
+
+  return { content: result.content, patchWarnings };
 }
 
 async function generateFileContent(params) {
+  const { stripCodeFences } = require("./stripCodeFences");
   const prompt = buildGenerationPrompt(params);
 
   const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
@@ -199,7 +243,7 @@ async function generateFileContent(params) {
     return applyScopedEdit(rawOutput, params.existingContent);
   }
 
-  return rawOutput;
+  return { content: stripCodeFences(rawOutput), patchWarnings: [] };
 }
 
 async function generateFix(params) {

@@ -71,57 +71,81 @@ function countOccurrences(haystack, needle) {
   return count;
 }
 
-// Applies a sequence of search/replace blocks to the original content,
-// one at a time, each against the result of the previous step. Each
-// block's `search` text must match EXACTLY ONCE in the current working
-// content at the time it's applied -- zero matches (the model
-// hallucinated a snippet that doesn't actually exist verbatim) or
-// multiple matches (the snippet is ambiguous -- which one did the
-// model actually mean?) are both treated as a hard failure rather than
-// guessed at, consistent with refusing rather than silently doing
-// something that might be wrong.
+// Applies a sequence of search/replace blocks to the original content.
+// Each block is attempted independently: blocks whose SEARCH text
+// matches exactly once in the CURRENT working content (i.e. after any
+// earlier blocks have already been applied) are applied; blocks that
+// fail (zero matches, ambiguous multiple matches, or empty SEARCH
+// text) are skipped and reported, but do NOT prevent the remaining
+// blocks from being attempted.
 //
-// Returns { success: true, content } on success, or
-// { success: false, reason, failedBlockIndex } on failure -- the
-// working content up to the point of failure is discarded entirely
-// rather than partially applied, so a failure never leaves the file in
-// a half-patched state.
+// This is a deliberate choice: if a model produces one good change and
+// one bad one in the same response, discarding the good change too
+// would throw away real, verifiably-correct work. Every skipped block
+// is reported in full detail (never silently dropped) so a human
+// reviewing the result knows exactly what did and didn't happen and
+// why -- "apply what matches, report what failed" rather than
+// all-or-nothing.
+//
+// Returns:
+//   content        - the file content with all successfully-matched
+//                     blocks applied (identical to originalContent if
+//                     none matched)
+//   appliedCount    - how many blocks were successfully applied
+//   totalBlocks     - how many blocks were attempted
+//   failedBlocks    - array of { index, search, reason } for every
+//                     block that could not be applied
+//   allSucceeded    - true only if every block applied cleanly
+//   noneSucceeded   - true if not a single block could be applied
 function applySearchReplaceBlocks(originalContent, blocks) {
   let workingContent = originalContent;
+  let appliedCount = 0;
+  const failedBlocks = [];
 
   for (let i = 0; i < blocks.length; i++) {
     const { search, replace } = blocks[i];
 
     if (!search || search.trim().length === 0) {
-      return {
-        success: false,
-        reason: `Block ${i + 1}: SEARCH text is empty, which would match everywhere and can't be applied safely.`,
-        failedBlockIndex: i
-      };
+      failedBlocks.push({
+        index: i,
+        search,
+        reason: `Block ${i + 1}: SEARCH text is empty, which would match everywhere and can't be applied safely.`
+      });
+      continue;
     }
 
     const occurrences = countOccurrences(workingContent, search);
 
     if (occurrences === 0) {
-      return {
-        success: false,
-        reason: `Block ${i + 1}: the SEARCH text does not appear verbatim in the file. The model may have paraphrased or misremembered the existing code instead of copying it exactly.`,
-        failedBlockIndex: i
-      };
+      failedBlocks.push({
+        index: i,
+        search,
+        reason: `Block ${i + 1}: the SEARCH text does not appear verbatim in the file. The model may have paraphrased or misremembered the existing code instead of copying it exactly.`
+      });
+      continue;
     }
 
     if (occurrences > 1) {
-      return {
-        success: false,
-        reason: `Block ${i + 1}: the SEARCH text matches ${occurrences} different locations in the file, so it's ambiguous which one should be replaced. The SEARCH snippet needs to include more surrounding context to uniquely identify one location.`,
-        failedBlockIndex: i
-      };
+      failedBlocks.push({
+        index: i,
+        search,
+        reason: `Block ${i + 1}: the SEARCH text matches ${occurrences} different locations in the file, so it's ambiguous which one should be replaced. The SEARCH snippet needs to include more surrounding context to uniquely identify one location.`
+      });
+      continue;
     }
 
     workingContent = workingContent.replace(search, replace);
+    appliedCount++;
   }
 
-  return { success: true, content: workingContent };
+  return {
+    content: workingContent,
+    appliedCount,
+    totalBlocks: blocks.length,
+    failedBlocks,
+    allSucceeded: failedBlocks.length === 0,
+    noneSucceeded: appliedCount === 0
+  };
 }
 
 module.exports = { parseSearchReplaceBlocks, applySearchReplaceBlocks };
