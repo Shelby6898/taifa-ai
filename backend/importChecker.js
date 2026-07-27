@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
 const NODE_BUILTINS = new Set([
   "fs", "path", "http", "https", "crypto", "os", "url", "util",
@@ -27,10 +27,10 @@ function extractSpecifiers(content) {
   return [...specifiers];
 }
 
-function findPackageJson(startDir) {
+function findPackageJson(workspaceDir, startDir) {
   let dir = startDir;
   for (let i = 0; i < 5; i++) {
-    if (!dir.startsWith(WORKSPACE_DIR)) break;
+    if (!dir.startsWith(workspaceDir)) break;
     const candidate = path.join(dir, "package.json");
     if (fs.existsSync(candidate)) return candidate;
     const parent = path.dirname(dir);
@@ -40,8 +40,8 @@ function findPackageJson(startDir) {
   return null;
 }
 
-function loadDeclaredDependencies(targetAbsDir) {
-  const pkgPath = findPackageJson(targetAbsDir);
+function loadDeclaredDependencies(workspaceDir, targetAbsDir) {
+  const pkgPath = findPackageJson(workspaceDir, targetAbsDir);
   if (!pkgPath) return null;
 
   try {
@@ -71,10 +71,11 @@ function loadDeclaredDependencies(targetAbsDir) {
 // exists on disk until the whole batch is actually applied. These
 // paths are treated as if they already exist, purely for resolution
 // purposes, alongside real on-disk files.
-function checkImports(content, targetAbsPath, siblingAbsPaths = []) {
+function checkImports(sessionKey, content, targetAbsPath, siblingAbsPaths = []) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
   const specifiers = extractSpecifiers(content);
   const targetDir = path.dirname(targetAbsPath);
-  const declaredDeps = loadDeclaredDependencies(targetDir);
+  const declaredDeps = loadDeclaredDependencies(workspaceDir, targetDir);
   const siblingSet = new Set(siblingAbsPaths);
 
   const results = specifiers.map((specifier) => {

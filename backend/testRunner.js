@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFile, execFileSync } = require("child_process");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 const MAX_OUTPUT_CHARS = 4000; // keep output readable in chat, avoid flooding the response
@@ -48,9 +48,10 @@ function truncateOutput(text) {
 //
 // This is the whole-project "run tests" command, distinct from the
 // per-file mechanical verification functions below.
-function runTests() {
+function runTests(sessionKey) {
   return new Promise((resolve) => {
-    const projectDir = findTestableProject(WORKSPACE_DIR);
+    const workspaceDir = getWorkspaceDir(sessionKey);
+    const projectDir = findTestableProject(workspaceDir);
 
     if (!projectDir) {
       resolve({
@@ -67,7 +68,7 @@ function runTests() {
       (error, stdout, stderr) => {
         resolve({
           success: true,
-          projectDir: path.relative(WORKSPACE_DIR, projectDir) || ".",
+          projectDir: path.relative(workspaceDir, projectDir) || ".",
           exitedWithError: error !== null,
           timedOut: error && error.killed === true,
           stdout: truncateOutput(stdout || ""),

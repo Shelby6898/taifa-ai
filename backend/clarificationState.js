@@ -1,18 +1,19 @@
 const crypto = require("crypto");
 
-let pendingClarification = null;
+const sessions = new Map(); // sessionKey -> clarification object
 
-function hasPendingClarification() {
-  return pendingClarification !== null;
+function hasPendingClarification(sessionKey) {
+  return sessions.has(sessionKey);
 }
 
-function getPendingClarification() {
-  return pendingClarification;
+function getPendingClarification(sessionKey) {
+  return sessions.get(sessionKey) || null;
 }
 
-function getPhase() {
-  if (!pendingClarification) return null;
-  return pendingClarification.phase;
+function getPhase(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return null;
+  return c.phase;
 }
 
 // questions: array of { text, tag } — tag identifies the category for
@@ -25,10 +26,10 @@ function getPhase() {
 // projectMemory.js). Kept as its own field rather than concatenated
 // into description, so the Requirements Summary can display it
 // clearly instead of it bleeding awkwardly into the "Project:" line.
-function startClarification({ description, questions, memoryContext }) {
+function startClarification(sessionKey, { description, questions, memoryContext }) {
   const id = crypto.randomBytes(8).toString("hex");
 
-  pendingClarification = {
+  const clarification = {
     id,
     description,
     questions, // [{ text, tag }]
@@ -42,30 +43,34 @@ function startClarification({ description, questions, memoryContext }) {
     memoryContext: memoryContext || null
   };
 
-  return pendingClarification;
+  sessions.set(sessionKey, clarification);
+  return clarification;
 }
 
-function recordAnswer({ answer, skipped }) {
-  if (!pendingClarification) {
+function recordAnswer(sessionKey, { answer, skipped }) {
+  const c = sessions.get(sessionKey);
+  if (!c) {
     return { success: false, reason: "No pending clarification session" };
   }
 
-  const q = pendingClarification.questions[pendingClarification.currentIndex];
-  pendingClarification.answers.push({ tag: q.tag, question: q.text, answer, skipped });
-  pendingClarification.currentIndex += 1;
+  const q = c.questions[c.currentIndex];
+  c.answers.push({ tag: q.tag, question: q.text, answer, skipped });
+  c.currentIndex += 1;
 
-  return { success: true, clarification: pendingClarification };
+  return { success: true, clarification: c };
 }
 
-function isComplete() {
-  if (!pendingClarification) return false;
-  return pendingClarification.currentIndex >= pendingClarification.questions.length;
+function isComplete(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return false;
+  return c.currentIndex >= c.questions.length;
 }
 
-function getCurrentQuestion() {
-  if (!pendingClarification) return null;
-  if (isComplete()) return null;
-  return pendingClarification.questions[pendingClarification.currentIndex].text;
+function getCurrentQuestion(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return null;
+  if (isComplete(sessionKey)) return null;
+  return c.questions[c.currentIndex].text;
 }
 
 // Deterministic — builds a labeled summary directly from the tagged
@@ -75,11 +80,12 @@ function getCurrentQuestion() {
 // omitting untouched tags instead of printing "(not specified)" for
 // every field the short question set (used when project memory
 // already exists) never asks about.
-function buildRequirementsSummary() {
-  if (!pendingClarification) return "";
+function buildRequirementsSummary(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return "";
 
   const byTag = {};
-  pendingClarification.answers.forEach((a) => {
+  c.answers.forEach((a) => {
     byTag[a.tag] = a.skipped ? "(no preference given — best judgment)" : a.answer;
   });
 
@@ -94,14 +100,13 @@ function buildRequirementsSummary() {
   };
 
   const lines = [];
-
-  if (pendingClarification.memoryContext) {
+  if (c.memoryContext) {
     lines.push("Established project context (from memory):");
-    lines.push(pendingClarification.memoryContext.trim());
+    lines.push(c.memoryContext.trim());
     lines.push("");
   }
 
-  lines.push(`Project: ${pendingClarification.description}`);
+  lines.push(`Project: ${c.description}`);
   lines.push("");
 
   Object.keys(labels).forEach((tag) => {
@@ -110,55 +115,62 @@ function buildRequirementsSummary() {
     }
   });
 
-  pendingClarification.summaryText = lines.join("\n");
-  return pendingClarification.summaryText;
+  c.summaryText = lines.join("\n");
+  return c.summaryText;
 }
 
-function setPhase(phase) {
-  if (!pendingClarification) return;
-  pendingClarification.phase = phase;
+function setPhase(sessionKey, phase) {
+  const c = sessions.get(sessionKey);
+  if (!c) return;
+  c.phase = phase;
 }
 
-function setEnrichedDescription(desc) {
-  if (!pendingClarification) return;
-  pendingClarification.enrichedDescription = desc;
+function setEnrichedDescription(sessionKey, desc) {
+  const c = sessions.get(sessionKey);
+  if (!c) return;
+  c.enrichedDescription = desc;
 }
 
-function getEnrichedDescription() {
-  if (!pendingClarification) return null;
-  return pendingClarification.enrichedDescription;
+function getEnrichedDescription(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return null;
+  return c.enrichedDescription;
 }
 
-function beginArchitectureConfirmation({ relevantFiles }) {
-  if (!pendingClarification) {
+function beginArchitectureConfirmation(sessionKey, { relevantFiles }) {
+  const c = sessions.get(sessionKey);
+  if (!c) {
     return { success: false, reason: "No pending clarification session" };
   }
-  pendingClarification.phase = "architecture";
-  pendingClarification.relevantFiles = relevantFiles;
+  c.phase = "architecture";
+  c.relevantFiles = relevantFiles;
   return { success: true };
 }
 
-function getRelevantFiles() {
-  if (!pendingClarification) return null;
-  return pendingClarification.relevantFiles;
+function getRelevantFiles(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return null;
+  return c.relevantFiles;
 }
 
-function beginBlueprintConfirmation({ blueprint }) {
-  if (!pendingClarification) {
+function beginBlueprintConfirmation(sessionKey, { blueprint }) {
+  const c = sessions.get(sessionKey);
+  if (!c) {
     return { success: false, reason: "No pending clarification session" };
   }
-  pendingClarification.phase = "blueprint";
-  pendingClarification.blueprint = blueprint;
+  c.phase = "blueprint";
+  c.blueprint = blueprint;
   return { success: true };
 }
 
-function getBlueprint() {
-  if (!pendingClarification) return null;
-  return pendingClarification.blueprint;
+function getBlueprint(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return null;
+  return c.blueprint;
 }
 
-function clearClarification() {
-  pendingClarification = null;
+function clearClarification(sessionKey) {
+  sessions.delete(sessionKey);
 }
 
 module.exports = {

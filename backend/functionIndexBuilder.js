@@ -1,12 +1,16 @@
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR, loadIndex } = require("./fileIndexer");
-
-const FUNCTION_INDEX_PATH = path.join(__dirname, "memory", "functionIndex.json");
+const { getWorkspaceDir } = require("./workspaceResolver");
+const { loadIndex } = require("./fileIndexer");
 
 const FUNCTION_DECLARATION_PATTERN = /function\s+(\w+)\s*\(/g;
 const ARROW_FUNCTION_PATTERN = /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>/g;
 const ROUTE_PATTERN = /(?:app|router)\.(get|post|put|delete|patch)\(\s*['"]([^'"]+)['"]/g;
+
+function functionIndexPathFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return path.join(__dirname, "memory", `functionIndex-${studentId}__${projectName}.json`);
+}
 
 function lineNumberAt(content, index) {
   return content.slice(0, index).split("\n").length;
@@ -50,12 +54,13 @@ function extractFromFile(relativePath, content) {
   return entries;
 }
 
-function buildFunctionIndex() {
-  const indexedFiles = loadIndex();
+function buildFunctionIndex(sessionKey) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  const indexedFiles = loadIndex(sessionKey);
   let allEntries = [];
 
   for (const file of indexedFiles) {
-    const absPath = path.join(WORKSPACE_DIR, file.path);
+    const absPath = path.join(workspaceDir, file.path);
     let content = "";
     try {
       content = fs.readFileSync(absPath, "utf-8");
@@ -65,17 +70,19 @@ function buildFunctionIndex() {
     allEntries = allEntries.concat(extractFromFile(file.path, content));
   }
 
-  fs.mkdirSync(path.dirname(FUNCTION_INDEX_PATH), { recursive: true });
-  fs.writeFileSync(FUNCTION_INDEX_PATH, JSON.stringify(allEntries, null, 2));
-  console.log(`[functionIndexBuilder] Function index rebuilt — ${allEntries.length} entries @ ${new Date().toISOString()}`);
+  const functionIndexPath = functionIndexPathFor(sessionKey);
+  fs.mkdirSync(path.dirname(functionIndexPath), { recursive: true });
+  fs.writeFileSync(functionIndexPath, JSON.stringify(allEntries, null, 2));
+  console.log(`[functionIndexBuilder] Function index rebuilt for ${sessionKey} — ${allEntries.length} entries @ ${new Date().toISOString()}`);
   return allEntries;
 }
 
-function loadFunctionIndex() {
-  if (!fs.existsSync(FUNCTION_INDEX_PATH)) {
-    return buildFunctionIndex();
+function loadFunctionIndex(sessionKey) {
+  const functionIndexPath = functionIndexPathFor(sessionKey);
+  if (!fs.existsSync(functionIndexPath)) {
+    return buildFunctionIndex(sessionKey);
   }
-  return JSON.parse(fs.readFileSync(FUNCTION_INDEX_PATH, "utf-8"));
+  return JSON.parse(fs.readFileSync(functionIndexPath, "utf-8"));
 }
 
 function scoreEntry(query, entry) {
@@ -90,8 +97,8 @@ function scoreEntry(query, entry) {
   return score;
 }
 
-function searchFunctionIndex(query, topN = 5) {
-  const index = loadFunctionIndex();
+function searchFunctionIndex(sessionKey, query, topN = 5) {
+  const index = loadFunctionIndex(sessionKey);
   const scored = index
     .map((entry) => ({ ...entry, score: scoreEntry(query, entry) }))
     .filter((entry) => entry.score > 0)

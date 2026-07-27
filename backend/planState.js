@@ -1,46 +1,49 @@
 const crypto = require("crypto");
 
-let pendingPlan = null;
-let activeCampaign = null;
+const plans = new Map(); // sessionKey -> pending plan
+const campaigns = new Map(); // sessionKey -> active campaign
 
-function hasPendingPlan() {
-  return pendingPlan !== null;
+function hasPendingPlan(sessionKey) {
+  return plans.has(sessionKey);
 }
 
-function getPendingPlan() {
-  return pendingPlan;
+function getPendingPlan(sessionKey) {
+  return plans.get(sessionKey) || null;
 }
 
-function createPlan({ description, files }) {
+function createPlan(sessionKey, { description, files }) {
   const id = crypto.randomBytes(8).toString("hex");
 
-  pendingPlan = {
+  const plan = {
     id,
     description,
     files, // [{ path, description }]
     stage: "plan_proposed"
   };
 
-  return pendingPlan;
+  plans.set(sessionKey, plan);
+  return plan;
 }
 
-function enrichWithDiffs(planId, enrichedFiles) {
-  if (!pendingPlan || pendingPlan.id !== planId) {
+function enrichWithDiffs(sessionKey, planId, enrichedFiles) {
+  const plan = plans.get(sessionKey);
+  if (!plan || plan.id !== planId) {
     return { success: false, reason: "No matching pending plan found" };
   }
 
-  pendingPlan.files = enrichedFiles; // [{ path, description, before, after }]
-  pendingPlan.stage = "diffs_proposed";
+  plan.files = enrichedFiles; // [{ path, description, before, after }]
+  plan.stage = "diffs_proposed";
 
-  return { success: true, plan: pendingPlan };
+  return { success: true, plan };
 }
 
-function clearPlan() {
-  pendingPlan = null;
+function clearPlan(sessionKey) {
+  plans.delete(sessionKey);
 }
 
-function isValidPlanId(planId) {
-  return pendingPlan !== null && pendingPlan.id === planId;
+function isValidPlanId(sessionKey, planId) {
+  const plan = plans.get(sessionKey);
+  return plan !== undefined && plan.id === planId;
 }
 
 // --- Campaign tracking for multi-batch plans ---
@@ -53,18 +56,18 @@ function isValidPlanId(planId) {
 // tracking the real remaining list deterministically is more reliable
 // than trusting the model to reconstruct it from context.
 
-function hasActiveCampaign() {
-  return activeCampaign !== null;
+function hasActiveCampaign(sessionKey) {
+  return campaigns.has(sessionKey);
 }
 
-function getActiveCampaign() {
-  return activeCampaign;
+function getActiveCampaign(sessionKey) {
+  return campaigns.get(sessionKey) || null;
 }
 
-function startCampaign({ description, remainingFiles }) {
+function startCampaign(sessionKey, { description, remainingFiles }) {
   const id = crypto.randomBytes(8).toString("hex");
 
-  activeCampaign = {
+  const campaign = {
     id,
     description,
     completedFiles: [], // flat list of paths written so far, for record-keeping
@@ -73,40 +76,43 @@ function startCampaign({ description, remainingFiles }) {
     status: "active"
   };
 
-  return activeCampaign;
+  campaigns.set(sessionKey, campaign);
+  return campaign;
 }
 
-function recordBatchCompletion(campaignId, filePaths) {
-  if (!activeCampaign || activeCampaign.id !== campaignId) {
+function recordBatchCompletion(sessionKey, campaignId, filePaths) {
+  const campaign = campaigns.get(sessionKey);
+  if (!campaign || campaign.id !== campaignId) {
     return { success: false, reason: "No matching active campaign found" };
   }
 
-  activeCampaign.completedFiles = activeCampaign.completedFiles.concat(filePaths);
-  activeCampaign.batchNumber += 1;
+  campaign.completedFiles = campaign.completedFiles.concat(filePaths);
+  campaign.batchNumber += 1;
 
-  return { success: true, campaign: activeCampaign };
+  return { success: true, campaign };
 }
 
 // Pulls up to maxFiles from the campaign's remaining queue, removing
 // them from it. Returns the batch and how many files are still left
 // after this batch — an empty batch means the campaign is complete.
-function takeNextBatch(campaignId, maxFiles) {
-  if (!activeCampaign || activeCampaign.id !== campaignId) {
+function takeNextBatch(sessionKey, campaignId, maxFiles) {
+  const campaign = campaigns.get(sessionKey);
+  if (!campaign || campaign.id !== campaignId) {
     return { success: false, reason: "No matching active campaign found" };
   }
 
-  const batch = activeCampaign.remainingFiles.slice(0, maxFiles);
-  activeCampaign.remainingFiles = activeCampaign.remainingFiles.slice(maxFiles);
+  const batch = campaign.remainingFiles.slice(0, maxFiles);
+  campaign.remainingFiles = campaign.remainingFiles.slice(maxFiles);
 
   return {
     success: true,
     files: batch,
-    remainingCount: activeCampaign.remainingFiles.length
+    remainingCount: campaign.remainingFiles.length
   };
 }
 
-function clearCampaign() {
-  activeCampaign = null;
+function clearCampaign(sessionKey) {
+  campaigns.delete(sessionKey);
 }
 
 module.exports = {

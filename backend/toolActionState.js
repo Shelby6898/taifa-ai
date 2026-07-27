@@ -1,27 +1,29 @@
 const crypto = require("crypto");
 
-let pendingAction = null;
+const actions = new Map(); // sessionKey -> pending action
 
-function hasPendingAction() {
-  return pendingAction !== null;
+function hasPendingAction(sessionKey) {
+  return actions.has(sessionKey);
 }
 
-function getPendingAction() {
-  return pendingAction;
+function getPendingAction(sessionKey) {
+  return actions.get(sessionKey) || null;
 }
 
-function createPendingAction({ type, payload }) {
+function createPendingAction(sessionKey, { type, payload }) {
   const id = crypto.randomBytes(8).toString("hex");
-  pendingAction = { id, type, payload };
-  return pendingAction;
+  const action = { id, type, payload };
+  actions.set(sessionKey, action);
+  return action;
 }
 
-function isValidActionId(id) {
-  return pendingAction !== null && pendingAction.id === id;
+function isValidActionId(sessionKey, id) {
+  const action = actions.get(sessionKey);
+  return action !== undefined && action.id === id;
 }
 
-function clearPendingAction() {
-  pendingAction = null;
+function clearPendingAction(sessionKey) {
+  actions.delete(sessionKey);
 }
 
 module.exports = {

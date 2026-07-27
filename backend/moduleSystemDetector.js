@@ -1,18 +1,19 @@
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
-// Walks upward from the given file's directory, within WORKSPACE_DIR
+// Walks upward from the given file's directory, within the workspace
 // only, looking for the nearest package.json to determine the real
 // module system Node will enforce at runtime for that location —
 // "module" (ES import/export required, require() undefined) or
 // "commonjs" (require/module.exports, the Node default when no
 // package.json or no "type" field is present).
-function getModuleSystemForPath(absPath) {
+function getModuleSystemForPath(sessionKey, absPath) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
   let dir = path.dirname(absPath);
 
   for (let i = 0; i < 6; i++) {
-    if (!dir.startsWith(WORKSPACE_DIR)) break;
+    if (!dir.startsWith(workspaceDir)) break;
 
     const pkgPath = path.join(dir, "package.json");
     if (fs.existsSync(pkgPath)) {

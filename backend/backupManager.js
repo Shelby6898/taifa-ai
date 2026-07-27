@@ -1,23 +1,27 @@
 const fs = require("fs");
 const path = require("path");
 
-const BACKUP_DIR = path.join(__dirname, "memory", "backups");
+function backupDirFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return path.join(__dirname, "memory", "backups", `${studentId}__${projectName}`);
+}
 
-function backupFilePath(targetPath) {
+function backupFilePath(sessionKey, targetPath) {
   // Mirror the relative structure with slashes replaced, so nested
   // paths don't collide or require recreating subfolders inside backups/
   const safeName = targetPath.replace(/[\\/]/g, "__");
-  return path.join(BACKUP_DIR, `${safeName}.bak`);
+  return path.join(backupDirFor(sessionKey), `${safeName}.bak`);
 }
 
-function backupExistingFile(resolvedPath, targetPath) {
+function backupExistingFile(sessionKey, resolvedPath, targetPath) {
   if (!fs.existsSync(resolvedPath)) {
     return null;
   }
 
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const backupDir = backupDirFor(sessionKey);
+  fs.mkdirSync(backupDir, { recursive: true });
 
-  const backupPath = backupFilePath(targetPath);
+  const backupPath = backupFilePath(sessionKey, targetPath);
   const content = fs.readFileSync(resolvedPath, "utf-8");
 
   fs.writeFileSync(backupPath, content);
@@ -26,8 +30,8 @@ function backupExistingFile(resolvedPath, targetPath) {
   return backupPath;
 }
 
-function restoreFromBackup(targetPath) {
-  const backupPath = backupFilePath(targetPath);
+function restoreFromBackup(sessionKey, targetPath) {
+  const backupPath = backupFilePath(sessionKey, targetPath);
   if (!fs.existsSync(backupPath)) {
     return { success: false, reason: "No backup found for this file" };
   }

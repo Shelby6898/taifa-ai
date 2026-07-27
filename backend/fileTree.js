@@ -1,26 +1,29 @@
 const fs = require("fs");
 const path = require("path");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
-const WORKSPACE_DIR = path.join(__dirname, "..", "workspace");
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 
-function buildTree(dir = WORKSPACE_DIR) {
-  if (!fs.existsSync(dir)) return [];
+function buildTree(sessionKey, dir = null) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  const currentDir = dir || workspaceDir;
 
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  if (!fs.existsSync(currentDir)) return [];
+
+  const entries = fs.readdirSync(currentDir, { withFileTypes: true });
 
   return entries
     .filter((entry) => !SKIP_DIRS.has(entry.name))
     .map((entry) => {
-      const fullPath = path.join(dir, entry.name);
-      const relativePath = path.relative(WORKSPACE_DIR, fullPath);
+      const fullPath = path.join(currentDir, entry.name);
+      const relativePath = path.relative(workspaceDir, fullPath);
 
       if (entry.isDirectory()) {
         return {
           name: entry.name,
           path: relativePath,
           type: "folder",
-          children: buildTree(fullPath)
+          children: buildTree(sessionKey, fullPath)
         };
       }
 

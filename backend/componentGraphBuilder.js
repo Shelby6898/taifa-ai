@@ -1,11 +1,14 @@
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 const { loadImportGraph } = require("./importGraphBuilder");
 
-const COMPONENT_GRAPH_PATH = path.join(__dirname, "memory", "componentGraph.json");
-
 const JSX_TAG_PATTERN = /<([A-Z][A-Za-z0-9_]*)/g;
+
+function componentGraphPathFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return path.join(__dirname, "memory", `componentGraph-${studentId}__${projectName}.json`);
+}
 
 function basenameNoExt(relativePath) {
   return path.basename(relativePath, path.extname(relativePath));
@@ -27,12 +30,13 @@ function extractJsxTags(content) {
 // file's content. This distinguishes "imports and renders as a component"
 // from "imports and uses as a value/hook/utility" without needing a
 // separate import-parsing pass.
-function buildComponentGraph() {
-  const importGraph = loadImportGraph();
+function buildComponentGraph(sessionKey) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  const importGraph = loadImportGraph(sessionKey);
   const componentEdges = [];
 
   for (const file of importGraph) {
-    const absPath = path.join(WORKSPACE_DIR, file.path);
+    const absPath = path.join(workspaceDir, file.path);
     let content = "";
     try {
       content = fs.readFileSync(absPath, "utf-8");
@@ -57,21 +61,23 @@ function buildComponentGraph() {
     }
   }
 
-  fs.mkdirSync(path.dirname(COMPONENT_GRAPH_PATH), { recursive: true });
-  fs.writeFileSync(COMPONENT_GRAPH_PATH, JSON.stringify(componentEdges, null, 2));
-  console.log(`[componentGraphBuilder] Component graph rebuilt — ${componentEdges.length} file(s) with render edges @ ${new Date().toISOString()}`);
+  const componentGraphPath = componentGraphPathFor(sessionKey);
+  fs.mkdirSync(path.dirname(componentGraphPath), { recursive: true });
+  fs.writeFileSync(componentGraphPath, JSON.stringify(componentEdges, null, 2));
+  console.log(`[componentGraphBuilder] Component graph rebuilt for ${sessionKey} — ${componentEdges.length} file(s) with render edges @ ${new Date().toISOString()}`);
   return componentEdges;
 }
 
-function loadComponentGraph() {
-  if (!fs.existsSync(COMPONENT_GRAPH_PATH)) {
-    return buildComponentGraph();
+function loadComponentGraph(sessionKey) {
+  const componentGraphPath = componentGraphPathFor(sessionKey);
+  if (!fs.existsSync(componentGraphPath)) {
+    return buildComponentGraph(sessionKey);
   }
-  return JSON.parse(fs.readFileSync(COMPONENT_GRAPH_PATH, "utf-8"));
+  return JSON.parse(fs.readFileSync(componentGraphPath, "utf-8"));
 }
 
-function getComponentRelations(relativePath) {
-  const graph = loadComponentGraph();
+function getComponentRelations(sessionKey, relativePath) {
+  const graph = loadComponentGraph(sessionKey);
   return graph.find((f) => f.path === relativePath) || null;
 }
 

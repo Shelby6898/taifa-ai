@@ -1,29 +1,34 @@
 const fs = require("fs");
 const path = require("path");
 const chokidar = require("chokidar");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
-const WORKSPACE_DIR = path.join(__dirname, "..", "workspace");
-const INDEX_PATH = path.join(__dirname, "memory", "fileIndex.json");
 const LINES_TO_INDEX = 40;
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 const SKIP_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".ico", ".lock", ".woff", ".ttf"]);
 const DEBOUNCE_MS = 1000;
+const IDLE_TIMEOUT_MS = 25 * 60 * 1000; // close a watcher after 25 min of no activity
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // check for idle watchers every 5 min
 
 // --- Token budget config for formatFullIndex() ---
 const MAX_INDEX_TOKENS = 1200;   // leave headroom for history + memory + prompt within a 6144 num_ctx
 const MAX_LINES_PER_FILE = 25;   // trim from the 40-line stored snippet when formatting into a prompt
 const CHARS_PER_TOKEN = 4;       // rough estimate, fine for budgeting, not precision
 
-let debounceTimer = null;
+const debounceTimers = new Map(); // sessionKey -> timer
+const activeWatchers = new Map(); // sessionKey -> { watcher, lastActivity }
+
+function indexPathFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return path.join(__dirname, "memory", `fileIndex-${studentId}__${projectName}.json`);
+}
 
 function walkDir(dir, fileList = []) {
   if (!fs.existsSync(dir)) return fileList;
   const entries = fs.readdirSync(dir, { withFileTypes: true });
-
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name)) continue;
     const fullPath = path.join(dir, entry.name);
-
     if (entry.isDirectory()) {
       walkDir(fullPath, fileList);
     } else {
@@ -44,31 +49,33 @@ function readFirstLines(filePath, n) {
   }
 }
 
-function buildIndex() {
-  const files = walkDir(WORKSPACE_DIR);
+function buildIndex(sessionKey) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  const files = walkDir(workspaceDir);
   const index = files.map((filePath) => {
-    const relativePath = path.relative(WORKSPACE_DIR, filePath);
+    const relativePath = path.relative(workspaceDir, filePath);
     const snippet = readFirstLines(filePath, LINES_TO_INDEX);
     return { path: relativePath, snippet };
   });
 
-  fs.mkdirSync(path.dirname(INDEX_PATH), { recursive: true });
-  fs.writeFileSync(INDEX_PATH, JSON.stringify(index, null, 2));
-  console.log(`[fileIndexer] Index rebuilt — ${index.length} files indexed @ ${new Date().toISOString()}`);
+  const indexPath = indexPathFor(sessionKey);
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+  console.log(`[fileIndexer] Index rebuilt for ${sessionKey} — ${index.length} files indexed @ ${new Date().toISOString()}`);
   return index;
 }
 
-function loadIndex() {
-  if (!fs.existsSync(INDEX_PATH)) {
-    return buildIndex();
+function loadIndex(sessionKey) {
+  const indexPath = indexPathFor(sessionKey);
+  if (!fs.existsSync(indexPath)) {
+    return buildIndex(sessionKey);
   }
-  return JSON.parse(fs.readFileSync(INDEX_PATH, "utf-8"));
+  return JSON.parse(fs.readFileSync(indexPath, "utf-8"));
 }
 
 function scoreFile(query, file) {
   const queryWords = query.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
   const haystack = (file.path + " " + file.snippet).toLowerCase();
-
   let score = 0;
   for (const word of queryWords) {
     const matches = haystack.split(word).length - 1;
@@ -77,8 +84,8 @@ function scoreFile(query, file) {
   return score;
 }
 
-function searchIndex(query, topN = 3, excludeExtensions = []) {
-  const index = loadIndex();
+function searchIndex(sessionKey, query, topN = 3, excludeExtensions = []) {
+  const index = loadIndex(sessionKey);
   const filteredIndex = index.filter((f) => !excludeExtensions.some((ext) => f.path.toLowerCase().endsWith(ext)));
   const scored = filteredIndex
     .map((file) => ({ ...file, score: scoreFile(query, file) }))
@@ -146,10 +153,9 @@ function formatRelationsLine(relations, componentRelations, schemaEntries) {
 // Any files that don't fit are named in a trailing notice so it's visible
 // to both the model and anyone debugging output, rather than silently
 // dropped.
-function formatFullIndex(query = null) {
-  const index = loadIndex();
+function formatFullIndex(sessionKey, query = null) {
+  const index = loadIndex(sessionKey);
   const codeOnlyIndex = index.filter((f) => !f.path.toLowerCase().endsWith(".md"));
-
   if (index.length === 0) {
     return "";
   }
@@ -158,8 +164,8 @@ function formatFullIndex(query = null) {
   const { loadComponentGraph } = require("./componentGraphBuilder");
   const { loadDbSchemaGraph } = require("./dbSchemaBuilder");
 
-  const componentGraph = loadComponentGraph();
-  const schemaGraph = loadDbSchemaGraph();
+  const componentGraph = loadComponentGraph(sessionKey);
+  const schemaGraph = loadDbSchemaGraph(sessionKey);
 
   const ranked = query
     ? [...codeOnlyIndex]
@@ -172,7 +178,7 @@ function formatFullIndex(query = null) {
   const dropped = [];
 
   for (const file of ranked) {
-    const relations = getFileRelations(file.path);
+    const relations = getFileRelations(sessionKey, file.path);
     const componentRelations = componentGraph.find((c) => c.path === file.path) || null;
     const schemaEntries = schemaGraph.filter((s) => s.path === file.path);
     const relationsLine = formatRelationsLine(relations, componentRelations, schemaEntries);
@@ -189,7 +195,6 @@ function formatFullIndex(query = null) {
   }
 
   let output = included.join("\n\n");
-
   if (dropped.length > 0) {
     output += `\n\n[Context budget reached — omitted ${dropped.length} file(s): ${dropped.join(", ")}]`;
   }
@@ -197,25 +202,46 @@ function formatFullIndex(query = null) {
   return output;
 }
 
-function debouncedRebuild() {
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    buildIndex();
-    const { buildImportGraph } = require("./importGraphBuilder");
-    buildImportGraph();
-    const { buildFunctionIndex } = require("./functionIndexBuilder");
-    buildFunctionIndex();
-    const { buildComponentGraph } = require("./componentGraphBuilder");
-    buildComponentGraph();
-    const { buildDbSchemaGraph } = require("./dbSchemaBuilder");
-    buildDbSchemaGraph();
-  }, DEBOUNCE_MS);
+function rebuildAllGraphs(sessionKey) {
+  buildIndex(sessionKey);
+  const { buildImportGraph } = require("./importGraphBuilder");
+  buildImportGraph(sessionKey);
+  const { buildFunctionIndex } = require("./functionIndexBuilder");
+  buildFunctionIndex(sessionKey);
+  const { buildComponentGraph } = require("./componentGraphBuilder");
+  buildComponentGraph(sessionKey);
+  const { buildDbSchemaGraph } = require("./dbSchemaBuilder");
+  buildDbSchemaGraph(sessionKey);
 }
 
-function startWatching() {
-  fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+function debouncedRebuild(sessionKey) {
+  if (debounceTimers.has(sessionKey)) {
+    clearTimeout(debounceTimers.get(sessionKey));
+  }
+  const timer = setTimeout(() => {
+    rebuildAllGraphs(sessionKey);
+    debounceTimers.delete(sessionKey);
+  }, DEBOUNCE_MS);
+  debounceTimers.set(sessionKey, timer);
+}
 
-  const watcher = chokidar.watch(WORKSPACE_DIR, {
+// Idempotent: if a watcher already exists for this session, just refresh
+// its last-activity timestamp and return. Otherwise create a new chokidar
+// watcher scoped to this student's workspace, do the initial index+graph
+// build, and register it. Called on every request that touches a
+// session, not just once at server boot — this is what makes the
+// per-student watcher model work without a fixed student roster.
+function ensureWatching(sessionKey) {
+  const existing = activeWatchers.get(sessionKey);
+  if (existing) {
+    existing.lastActivity = Date.now();
+    return existing.watcher;
+  }
+
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+
+  const watcher = chokidar.watch(workspaceDir, {
     ignored: (filePath) => {
       const segments = filePath.split(path.sep);
       return segments.some((seg) => SKIP_DIRS.has(seg));
@@ -225,24 +251,35 @@ function startWatching() {
   });
 
   watcher
-    .on("add", debouncedRebuild)
-    .on("change", debouncedRebuild)
-    .on("unlink", debouncedRebuild)
-    .on("error", (err) => console.error("[fileIndexer] Watcher error:", err.message));
+    .on("add", () => debouncedRebuild(sessionKey))
+    .on("change", () => debouncedRebuild(sessionKey))
+    .on("unlink", () => debouncedRebuild(sessionKey))
+    .on("error", (err) => console.error(`[fileIndexer] Watcher error for ${sessionKey}:`, err.message));
 
-  console.log(`[fileIndexer] Watching ${WORKSPACE_DIR} for changes`);
+  console.log(`[fileIndexer] Watching ${workspaceDir} for changes (${sessionKey})`);
+  rebuildAllGraphs(sessionKey);
 
-  buildIndex();
-  const { buildImportGraph } = require("./importGraphBuilder");
-  buildImportGraph();
-  const { buildFunctionIndex } = require("./functionIndexBuilder");
-  buildFunctionIndex();
-  const { buildComponentGraph } = require("./componentGraphBuilder");
-  buildComponentGraph();
-  const { buildDbSchemaGraph } = require("./dbSchemaBuilder");
-  buildDbSchemaGraph();
-
+  activeWatchers.set(sessionKey, { watcher, lastActivity: Date.now() });
   return watcher;
 }
 
-module.exports = { buildIndex, loadIndex, searchIndex, formatFullIndex, startWatching, WORKSPACE_DIR };
+// Periodic sweep: closes and removes any watcher that's been idle past
+// IDLE_TIMEOUT_MS. Nothing is lost when this happens — the index/graph
+// files stay on disk, and ensureWatching() will transparently recreate
+// the watcher (with a small rebuild cost) the next time that student
+// sends a request. This is what keeps memory/battery use bounded to
+// "students actually active right now" rather than growing forever.
+function sweepIdleWatchers() {
+  const now = Date.now();
+  for (const [sessionKey, entry] of activeWatchers.entries()) {
+    if (now - entry.lastActivity > IDLE_TIMEOUT_MS) {
+      entry.watcher.close();
+      activeWatchers.delete(sessionKey);
+      console.log(`[fileIndexer] Closed idle watcher for ${sessionKey}`);
+    }
+  }
+}
+
+setInterval(sweepIdleWatchers, SWEEP_INTERVAL_MS);
+
+module.exports = { buildIndex, loadIndex, searchIndex, formatFullIndex, debouncedRebuild, ensureWatching };

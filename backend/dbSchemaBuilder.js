@@ -1,14 +1,18 @@
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR, loadIndex } = require("./fileIndexer");
-
-const DB_SCHEMA_PATH = path.join(__dirname, "memory", "dbSchema.json");
+const { getWorkspaceDir } = require("./workspaceResolver");
+const { loadIndex } = require("./fileIndexer");
 
 // Matches: const userSchema = { ... } or const UserModel = { ... }
 // Captures the variable name and the object literal body.
 const SCHEMA_DECLARATION_PATTERN = /(?:const|let|var)\s+(\w*(?:Schema|Model))\s*=\s*\{([^}]*)\}/g;
 // Matches a field line inside a schema body: fieldName: Type
 const FIELD_PATTERN = /(\w+)\s*:\s*([A-Za-z_][\w.]*)/g;
+
+function dbSchemaPathFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return path.join(__dirname, "memory", `dbSchema-${studentId}__${projectName}.json`);
+}
 
 function extractSchemas(relativePath, content) {
   const schemas = [];
@@ -41,12 +45,13 @@ function extractSchemas(relativePath, content) {
 // On Firestore-based projects (no formal schema files) this will
 // correctly come back empty — that reflects the project's actual
 // architecture, not a builder bug.
-function buildDbSchemaGraph() {
-  const indexedFiles = loadIndex();
+function buildDbSchemaGraph(sessionKey) {
+  const workspaceDir = getWorkspaceDir(sessionKey);
+  const indexedFiles = loadIndex(sessionKey);
   let allSchemas = [];
 
   for (const file of indexedFiles) {
-    const absPath = path.join(WORKSPACE_DIR, file.path);
+    const absPath = path.join(workspaceDir, file.path);
     let content = "";
     try {
       content = fs.readFileSync(absPath, "utf-8");
@@ -73,17 +78,19 @@ function buildDbSchemaGraph() {
     }
   }
 
-  fs.mkdirSync(path.dirname(DB_SCHEMA_PATH), { recursive: true });
-  fs.writeFileSync(DB_SCHEMA_PATH, JSON.stringify(allSchemas, null, 2));
-  console.log(`[dbSchemaBuilder] DB schema graph rebuilt — ${allSchemas.length} schema(s) @ ${new Date().toISOString()}`);
+  const dbSchemaPath = dbSchemaPathFor(sessionKey);
+  fs.mkdirSync(path.dirname(dbSchemaPath), { recursive: true });
+  fs.writeFileSync(dbSchemaPath, JSON.stringify(allSchemas, null, 2));
+  console.log(`[dbSchemaBuilder] DB schema graph rebuilt for ${sessionKey} — ${allSchemas.length} schema(s) @ ${new Date().toISOString()}`);
   return allSchemas;
 }
 
-function loadDbSchemaGraph() {
-  if (!fs.existsSync(DB_SCHEMA_PATH)) {
-    return buildDbSchemaGraph();
+function loadDbSchemaGraph(sessionKey) {
+  const dbSchemaPath = dbSchemaPathFor(sessionKey);
+  if (!fs.existsSync(dbSchemaPath)) {
+    return buildDbSchemaGraph(sessionKey);
   }
-  return JSON.parse(fs.readFileSync(DB_SCHEMA_PATH, "utf-8"));
+  return JSON.parse(fs.readFileSync(dbSchemaPath, "utf-8"));
 }
 
 module.exports = { buildDbSchemaGraph, loadDbSchemaGraph };

@@ -1,7 +1,7 @@
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
 
@@ -21,11 +21,12 @@ function isValidPackageName(name) {
   return VALID_PACKAGE_NAME.test(name);
 }
 
-// Finds the nearest directory under WORKSPACE_DIR containing a
+// Finds the nearest directory under the workspace containing a
 // package.json, so installs land in the right project rather than
 // creating a stray node_modules at the workspace root.
 function findNearestPackageJsonDir(dir) {
   if (!fs.existsSync(dir)) return null;
+
   const pkgPath = path.join(dir, "package.json");
   if (fs.existsSync(pkgPath)) return dir;
 
@@ -38,7 +39,7 @@ function findNearestPackageJsonDir(dir) {
   return null;
 }
 
-function installPackage(packageName) {
+function installPackage(sessionKey, packageName) {
   return new Promise((resolve) => {
     if (!isValidPackageName(packageName)) {
       resolve({
@@ -48,7 +49,8 @@ function installPackage(packageName) {
       return;
     }
 
-    const projectDir = findNearestPackageJsonDir(WORKSPACE_DIR);
+    const workspaceDir = getWorkspaceDir(sessionKey);
+    const projectDir = findNearestPackageJsonDir(workspaceDir);
     if (!projectDir) {
       resolve({
         success: false,
@@ -64,7 +66,7 @@ function installPackage(packageName) {
       (error, stdout, stderr) => {
         resolve({
           success: error === null,
-          projectDir: path.relative(WORKSPACE_DIR, projectDir) || ".",
+          projectDir: path.relative(workspaceDir, projectDir) || ".",
           stdout: stdout || "",
           stderr: stderr || "",
           errorMessage: error ? error.message : null

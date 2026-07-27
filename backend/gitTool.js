@@ -1,17 +1,17 @@
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { WORKSPACE_DIR } = require("./fileIndexer");
+const { getWorkspaceDir } = require("./workspaceResolver");
 
 const RISKY_PATH_SEGMENTS = ["node_modules", "dist", "build", ".cache", "vendor", "__pycache__"];
 
-function isGitRepo() {
-  return fs.existsSync(path.join(WORKSPACE_DIR, ".git"));
+function isGitRepo(sessionKey) {
+  return fs.existsSync(path.join(getWorkspaceDir(sessionKey), ".git"));
 }
 
-function runGit(args) {
+function runGit(sessionKey, args) {
   return new Promise((resolve) => {
-    execFile("git", args, { cwd: WORKSPACE_DIR, timeout: 15000 }, (error, stdout, stderr) => {
+    execFile("git", args, { cwd: getWorkspaceDir(sessionKey), timeout: 15000 }, (error, stdout, stderr) => {
       resolve({
         success: error === null,
         stdout: stdout || "",
@@ -22,24 +22,24 @@ function runGit(args) {
   });
 }
 
-async function getStatus() {
-  if (!isGitRepo()) {
+async function getStatus(sessionKey) {
+  if (!isGitRepo(sessionKey)) {
     return { success: false, reason: "The workspace is not a git repository." };
   }
-  return runGit(["status", "--porcelain"]);
+  return runGit(sessionKey, ["status", "--porcelain"]);
 }
 
-async function getDiff() {
-  if (!isGitRepo()) {
+async function getDiff(sessionKey) {
+  if (!isGitRepo(sessionKey)) {
     return { success: false, reason: "The workspace is not a git repository." };
   }
 
   // git diff HEAD fails on a brand-new repo with no commits yet — fall
   // back to a plain working-tree diff in that case rather than erroring.
-  const withHead = await runGit(["diff", "HEAD"]);
+  const withHead = await runGit(sessionKey, ["diff", "HEAD"]);
   if (withHead.success) return withHead;
 
-  return runGit(["diff"]);
+  return runGit(sessionKey, ["diff"]);
 }
 
 // Scans git status output for path segments that look like generated
@@ -65,17 +65,17 @@ function detectRiskyPaths(statusOutput) {
   return [...found];
 }
 
-async function commitChanges(message) {
-  if (!isGitRepo()) {
+async function commitChanges(sessionKey, message) {
+  if (!isGitRepo(sessionKey)) {
     return { success: false, reason: "The workspace is not a git repository." };
   }
 
-  const addResult = await runGit(["add", "-A"]);
+  const addResult = await runGit(sessionKey, ["add", "-A"]);
   if (!addResult.success) {
     return { success: false, reason: "git add failed: " + addResult.errorMessage };
   }
 
-  const commitResult = await runGit(["commit", "-m", message]);
+  const commitResult = await runGit(sessionKey, ["commit", "-m", message]);
   if (!commitResult.success) {
     return { success: false, reason: "git commit failed: " + (commitResult.stderr || commitResult.errorMessage) };
   }

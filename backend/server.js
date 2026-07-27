@@ -4,8 +4,10 @@ const cors = require("cors");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const { getSessionKey } = require("./sessionKey");
+const { getWorkspaceDir } = require("./workspaceResolver");
 const { backupExistingFile } = require("./backupManager");
-const { searchIndex, buildIndex, startWatching, formatFullIndex } = require("./fileIndexer");
+const { searchIndex, buildIndex, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
 const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint } = require("./generateFileContent");
@@ -39,16 +41,16 @@ const app = express();
 const OLLAMA_URL = "http://127.0.0.1:11434";
 const MODEL_NAME = "qwen2.5-coder-6k";
 
-function syncReindexWorkspace() {
-  buildIndex();
+function syncReindexWorkspace(sessionKey) {
+  buildIndex(sessionKey);
   const { buildImportGraph } = require("./importGraphBuilder");
-  buildImportGraph();
+  buildImportGraph(sessionKey);
   const { buildFunctionIndex } = require("./functionIndexBuilder");
-  buildFunctionIndex();
+  buildFunctionIndex(sessionKey);
   const { buildComponentGraph } = require("./componentGraphBuilder");
-  buildComponentGraph();
+  buildComponentGraph(sessionKey);
   const { buildDbSchemaGraph } = require("./dbSchemaBuilder");
-  buildDbSchemaGraph();
+  buildDbSchemaGraph(sessionKey);
 }
 
 // Deterministic safety net for the technology-naming instruction in
@@ -80,9 +82,9 @@ function annotateStorageFiles(fileList, blueprint) {
   });
 }
 
-async function generateBatchPlan({ description, completedFiles, blueprint }) {
+async function generateBatchPlan({ description, completedFiles, blueprint }, sessionKey) {
   const MAX_PLAN_FILES = 5;
-  const fullIndex = formatFullIndex(description);
+  const fullIndex = formatFullIndex(sessionKey, description);
   const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
   const cleanedPlan = stripCodeFences(rawPlan);
   const parsedFiles = lenientJsonParse(cleanedPlan);
@@ -109,7 +111,6 @@ async function generateBatchPlan({ description, completedFiles, blueprint }) {
   }
 
   const truncatedFiles = droppedFiles ? droppedFiles.map((f) => f.path) : null;
-
   return { files, truncated: droppedFiles !== null, truncatedFiles, droppedFiles };
 }
 
@@ -128,8 +129,9 @@ app.get("/", (req, res) => {
 });
 
 app.post("/api/reindex", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
   try {
-    const index = buildIndex();
+    const index = buildIndex(sessionKey);
     res.json({ success: true, filesIndexed: index.length });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -148,10 +150,10 @@ function formatHistory(history) {
   return `Conversation history:\n${lines.join("\n")}\n\n`;
 }
 
-function buildFullPrompt(userPrompt, history) {
-  const memoryBlock = formatMemoryBlock();
+function buildFullPrompt(userPrompt, history, sessionKey) {
+  const memoryBlock = formatMemoryBlock(sessionKey);
   const historyBlock = formatHistory(history);
-  const matches = searchIndex(userPrompt, 3);
+  const matches = searchIndex(sessionKey, userPrompt, 3);
   let contextBlock = "";
   if (matches.length > 0) {
     const contextBlocks = matches
@@ -162,7 +164,7 @@ function buildFullPrompt(userPrompt, history) {
   return `${memoryBlock}${historyBlock}${contextBlock}User question: ${userPrompt}`;
 }
 
-async function handleWriteCommand(parsedCommand, res) {
+async function handleWriteCommand(parsedCommand, res, sessionKey) {
   if (parsedCommand.malformed) {
     return res.status(400).json({
       success: false,
@@ -173,7 +175,7 @@ async function handleWriteCommand(parsedCommand, res) {
 
   const { mode, targetPath, instruction } = parsedCommand;
 
-  const safetyCheck = isPathSafe(targetPath);
+  const safetyCheck = isPathSafe(sessionKey, targetPath);
 
   if (!safetyCheck.safe) {
     return res.status(400).json({
@@ -205,7 +207,7 @@ async function handleWriteCommand(parsedCommand, res) {
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
-    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
     const { runTestsAgainstProposal } = require("./testRunner");
@@ -294,8 +296,8 @@ async function handleWriteCommand(parsedCommand, res) {
   }
 }
 
-async function handleWriteTestsCommand(targetPath, res) {
-  const sourceSafetyCheck = isPathSafe(targetPath);
+async function handleWriteTestsCommand(targetPath, res, sessionKey) {
+  const sourceSafetyCheck = isPathSafe(sessionKey, targetPath);
 
   if (!sourceSafetyCheck.safe) {
     return res.status(400).json({
@@ -318,7 +320,7 @@ async function handleWriteTestsCommand(targetPath, res) {
   }
 
   const testFilePath = targetPath.replace(/\.(js|jsx|ts|tsx)$/, ".test.$1");
-  const testSafetyCheck = isPathSafe(testFilePath);
+  const testSafetyCheck = isPathSafe(sessionKey, testFilePath);
 
   if (!testSafetyCheck.safe) {
     return res.status(400).json({
@@ -340,7 +342,7 @@ async function handleWriteTestsCommand(targetPath, res) {
 
   try {
     const { getModuleSystemForPath, detectModuleSystemMismatch } = require("./moduleSystemDetector");
-    const requiredModuleSystem = getModuleSystemForPath(testSafetyCheck.resolvedPath);
+    const requiredModuleSystem = getModuleSystemForPath(sessionKey, testSafetyCheck.resolvedPath);
 
     const rawGenerated = await generateTestFile({
       sourceFilePath: targetPath,
@@ -365,7 +367,7 @@ async function handleWriteTestsCommand(targetPath, res) {
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
-    const importResult = checkImports(cleanedContent, testSafetyCheck.resolvedPath);
+    const importResult = checkImports(sessionKey, cleanedContent, testSafetyCheck.resolvedPath);
 
     if (!syntaxResult.valid || importResult.hasMissing) {
       return res.json({
@@ -440,7 +442,7 @@ async function handleWriteTestsCommand(targetPath, res) {
   }
 }
 
-async function handleFixCommand(fixCommand, res) {
+async function handleFixCommand(fixCommand, res, sessionKey) {
   if (fixCommand.malformed) {
     return res.status(400).json({
       success: false,
@@ -450,13 +452,13 @@ async function handleFixCommand(fixCommand, res) {
   }
 
   const { errorText } = fixCommand;
-  const workspaceDir = require("path").join(__dirname, "..", "workspace");
+  const workspaceDir = getWorkspaceDir(sessionKey);
 
   let relativePath = findWorkspaceRelativePath(errorText, workspaceDir);
   let locationMethod = "stack_trace";
 
   if (!relativePath) {
-    const matches = searchIndex(errorText, 1, [".md"]);
+    const matches = searchIndex(sessionKey, errorText, 1, [".md"]);
     if (matches.length > 0) {
       relativePath = matches[0].path;
       locationMethod = "keyword_search";
@@ -471,7 +473,7 @@ async function handleFixCommand(fixCommand, res) {
     });
   }
 
-  const safetyCheck = isPathSafe(relativePath);
+  const safetyCheck = isPathSafe(sessionKey, relativePath);
   if (!safetyCheck.safe) {
     return res.status(400).json({
       success: false,
@@ -502,7 +504,7 @@ async function handleFixCommand(fixCommand, res) {
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
-    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath);
+    const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
     const { runTestsAgainstProposal } = require("./testRunner");
@@ -592,8 +594,8 @@ async function handleFixCommand(fixCommand, res) {
   }
 }
 
-async function handleDocumentCommand(res) {
-  const fullIndex = formatFullIndex();
+async function handleDocumentCommand(res, sessionKey) {
+  const fullIndex = formatFullIndex(sessionKey);
 
   if (!fullIndex) {
     return res.json({
@@ -604,7 +606,7 @@ async function handleDocumentCommand(res) {
   }
 
   const targetPath = "README.md";
-  const safetyCheck = isPathSafe(targetPath);
+  const safetyCheck = isPathSafe(sessionKey, targetPath);
 
   if (!safetyCheck.safe) {
     return res.status(400).json({
@@ -649,9 +651,9 @@ async function handleDocumentCommand(res) {
   }
 }
 
-async function handleRunTestsCommand(res) {
+async function handleRunTestsCommand(res, sessionKey) {
   try {
-    const result = await runTests();
+    const result = await runTests(sessionKey);
 
     if (!result.success) {
       return res.json({
@@ -680,8 +682,8 @@ async function handleRunTestsCommand(res) {
   }
 }
 
-async function handleGitStatusCommand(res) {
-  const result = await getStatus();
+async function handleGitStatusCommand(res, sessionKey) {
+  const result = await getStatus(sessionKey);
 
   if (!result.success && result.reason) {
     return res.json({ success: true, action: "git_not_repo", message: result.reason });
@@ -695,8 +697,8 @@ async function handleGitStatusCommand(res) {
   });
 }
 
-async function handleGitDiffCommand(res) {
-  const result = await getDiff();
+async function handleGitDiffCommand(res, sessionKey) {
+  const result = await getDiff(sessionKey);
 
   if (!result.success && result.reason) {
     return res.json({ success: true, action: "git_not_repo", message: result.reason });
@@ -710,12 +712,12 @@ async function handleGitDiffCommand(res) {
   });
 }
 
-async function handleGitCommitCommand(res) {
-  if (!isGitRepo()) {
+async function handleGitCommitCommand(res, sessionKey) {
+  if (!isGitRepo(sessionKey)) {
     return res.json({ success: true, action: "git_not_repo", message: "The workspace is not a git repository." });
   }
 
-  if (hasPendingAction()) {
+  if (hasPendingAction(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "action_rejected",
@@ -723,14 +725,14 @@ async function handleGitCommitCommand(res) {
     });
   }
 
-  const diffResult = await getDiff();
+  const diffResult = await getDiff(sessionKey);
   const diffText = diffResult.stdout || "";
 
   if (!diffText.trim()) {
     return res.json({ success: true, action: "git_nothing_to_commit", message: "No uncommitted changes found." });
   }
 
-  const statusResult = await getStatus();
+  const statusResult = await getStatus(sessionKey);
   const riskyPaths = detectRiskyPaths(statusResult.stdout || "");
 
   if (riskyPaths.length > 0) {
@@ -754,7 +756,7 @@ async function handleGitCommitCommand(res) {
     const cleanedResponse = stripCodeFences(response.data.response);
     const suggestedMessage = cleanedResponse.trim().split("\n").filter((line) => line.trim().length > 0)[0].replace(/^`+|`+$/g, "").trim().slice(0, 200);
 
-    const action = createPendingAction({
+    const action = createPendingAction(sessionKey, {
       type: "git_commit",
       payload: { message: suggestedMessage, diffPreview: truncatedDiff }
     });
@@ -772,8 +774,8 @@ async function handleGitCommitCommand(res) {
   }
 }
 
-async function handleInstallCommand(installCommand, res) {
-  if (hasPendingAction()) {
+async function handleInstallCommand(installCommand, res, sessionKey) {
+  if (hasPendingAction(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "action_rejected",
@@ -781,7 +783,7 @@ async function handleInstallCommand(installCommand, res) {
     });
   }
 
-  const action = createPendingAction({
+  const action = createPendingAction(sessionKey, {
     type: "install",
     payload: { packageName: installCommand.packageName }
   });
@@ -795,18 +797,19 @@ async function handleInstallCommand(installCommand, res) {
 }
 
 app.post("/api/tool-action/approve", requireAuth, async (req, res) => {
+  const sessionKey = getSessionKey(req);
   const { actionId } = req.body;
 
-  if (!isValidActionId(actionId)) {
+  if (!isValidActionId(sessionKey, actionId)) {
     return res.status(400).json({ success: false, reason: "No matching pending action to approve." });
   }
 
-  const action = getPendingAction();
+  const action = getPendingAction(sessionKey);
 
   try {
     if (action.type === "git_commit") {
-      const result = await commitChanges(action.payload.message);
-      clearPendingAction();
+      const result = await commitChanges(sessionKey, action.payload.message);
+      clearPendingAction(sessionKey);
 
       if (!result.success) {
         return res.json({ success: true, action: "commit_failed", reason: result.reason });
@@ -816,8 +819,8 @@ app.post("/api/tool-action/approve", requireAuth, async (req, res) => {
     }
 
     if (action.type === "install") {
-      const result = await installPackage(action.payload.packageName);
-      clearPendingAction();
+      const result = await installPackage(sessionKey, action.payload.packageName);
+      clearPendingAction(sessionKey);
 
       if (!result.success) {
         return res.json({
@@ -835,27 +838,28 @@ app.post("/api/tool-action/approve", requireAuth, async (req, res) => {
       });
     }
 
-    clearPendingAction();
+    clearPendingAction(sessionKey);
     return res.status(400).json({ success: false, reason: "Unknown pending action type." });
   } catch (err) {
-    clearPendingAction();
+    clearPendingAction(sessionKey);
     console.error("Tool action execution failed:", err.message);
     return res.status(500).json({ success: false, reason: err.message });
   }
 });
 
 app.post("/api/tool-action/reject", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
   const { actionId } = req.body;
 
-  if (!isValidActionId(actionId)) {
+  if (!isValidActionId(sessionKey, actionId)) {
     return res.status(400).json({ success: false, reason: "No matching pending action to reject." });
   }
 
-  clearPendingAction();
+  clearPendingAction(sessionKey);
   return res.json({ success: true, action: "action_cleared" });
 });
 
-async function handlePlanCommand(planCommand, res) {
+async function handlePlanCommand(planCommand, res, sessionKey) {
   if (planCommand.malformed) {
     return res.status(400).json({
       success: false,
@@ -864,7 +868,7 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
-  if (hasPendingPlan()) {
+  if (hasPendingPlan(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -872,8 +876,8 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
-  if (hasActiveCampaign()) {
-    const campaign = getActiveCampaign();
+  if (hasActiveCampaign(sessionKey)) {
+    const campaign = getActiveCampaign(sessionKey);
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -881,24 +885,24 @@ async function handlePlanCommand(planCommand, res) {
     });
   }
 
-  if (hasPendingClarification()) {
+  if (hasPendingClarification(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
       reason: "A clarification session is already in progress. Answer the pending question before starting something new."
     });
   }
-  const memoryBlock = formatMemoryBlock();
+  const memoryBlock = formatMemoryBlock(sessionKey);
   const hasMemory = memoryBlock.length > 0;
   const questions = hasMemory ? SHORT_PLANNING_QUESTIONS : FIXED_PLANNING_QUESTIONS;
   const memoryContext = hasMemory ? memoryBlock : null;
 
-  startClarification({ description: planCommand.description, questions, memoryContext });
+  startClarification(sessionKey, { description: planCommand.description, questions, memoryContext });
 
   return res.json({
     success: true,
     action: "clarification_question",
-    question: getCurrentQuestion(),
+    question: getCurrentQuestion(sessionKey),
     questionNumber: 1,
     totalQuestions: questions.length,
     usingProjectMemory: hasMemory
@@ -912,13 +916,13 @@ async function handlePlanCommand(planCommand, res) {
 // complete description. Kept separate from handlePlanCommand so the
 // clarification step can wrap around this without duplicating the
 // actual plan-generation logic.
-async function generateAndReturnPlan(description, res, blueprint) {
+async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
   try {
     const { files: parsedFiles, truncated, truncatedFiles, droppedFiles } = await generateBatchPlan({
       description,
       completedFiles: [],
       blueprint
-    });
+    }, sessionKey);
 
     if (!Array.isArray(parsedFiles) || parsedFiles.length === 0) {
       return res.status(500).json({
@@ -930,11 +934,11 @@ async function generateAndReturnPlan(description, res, blueprint) {
 
     let campaignInfo = null;
     if (truncated) {
-      const campaign = startCampaign({ description, remainingFiles: droppedFiles });
+      const campaign = startCampaign(sessionKey, { description, remainingFiles: droppedFiles });
       campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
     }
 
-    const plan = createPlan({ description, files: parsedFiles });
+    const plan = createPlan(sessionKey, { description, files: parsedFiles });
 
     return res.json({
       success: true,
@@ -957,7 +961,7 @@ async function generateAndReturnPlan(description, res, blueprint) {
 }
 
 
-function handleExecutePlanCommand(executePlanCommand, res) {
+function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
   if (executePlanCommand.malformed) {
     return res.status(400).json({
       success: false,
@@ -966,7 +970,7 @@ function handleExecutePlanCommand(executePlanCommand, res) {
     });
   }
 
-  if (hasPendingPlan()) {
+  if (hasPendingPlan(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -974,8 +978,8 @@ function handleExecutePlanCommand(executePlanCommand, res) {
     });
   }
 
-  if (hasActiveCampaign()) {
-    const campaign = getActiveCampaign();
+  if (hasActiveCampaign(sessionKey)) {
+    const campaign = getActiveCampaign(sessionKey);
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -996,11 +1000,11 @@ function handleExecutePlanCommand(executePlanCommand, res) {
 
   let campaignInfo = null;
   if (truncated) {
-    const campaign = startCampaign({ description: executePlanCommand.description, remainingFiles: droppedFiles });
+    const campaign = startCampaign(sessionKey, { description: executePlanCommand.description, remainingFiles: droppedFiles });
     campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
   }
 
-  const plan = createPlan({ description: executePlanCommand.description, files });
+  const plan = createPlan(sessionKey, { description: executePlanCommand.description, files });
 
   return res.json({
     success: true,
@@ -1016,13 +1020,14 @@ function handleExecutePlanCommand(executePlanCommand, res) {
 }
 
 app.post("/api/chat", requireAuth, async (req, res) => {
-  const { prompt, history } = req.body;
+  const { prompt, history, projectName } = req.body;
+  const sessionKey = getSessionKey(req);
 
   if (!prompt) {
     return res.status(400).json({ success: false, error: "prompt is required" });
   }
-  if (hasPendingClarification()) {
-    const phase = getPhase();
+  if (hasPendingClarification(sessionKey)) {
+    const phase = getPhase(sessionKey);
     const trimmedPrompt = prompt.trim();
     const confirmPattern = /^(yes|yep|yeah|correct|looks good|proceed|go ahead|that'?s right|sounds good|confirmed|ok|okay|approve)\b/i;
 
@@ -1030,8 +1035,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     const looksLikeCancel = /^cancel$/i.test(trimmedPrompt);
 
     if (looksLikeCancel) {
-      const cancelledDescription = getPendingClarification().description;
-      clearClarification();
+      const cancelledDescription = getPendingClarification(sessionKey).description;
+      clearClarification(sessionKey);
       return res.json({
         success: true,
         action: "clarification_cancelled",
@@ -1040,7 +1045,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     }
 
     if (looksLikeNewPlanCommand) {
-      const pending = getPendingClarification();
+      const pending = getPendingClarification(sessionKey);
       return res.status(409).json({
         success: false,
         action: "plan_rejected",
@@ -1052,8 +1057,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
     if (phase === "summary") {
       if (!isConfirmation) {
-        const revisedDescription = getEnrichedDescription() + "\n\nRevision from the user:\n" + trimmedPrompt;
-        setEnrichedDescription(revisedDescription);
+        const revisedDescription = getEnrichedDescription(sessionKey) + "\n\nRevision from the user:\n" + trimmedPrompt;
+        setEnrichedDescription(sessionKey, revisedDescription);
         return res.json({
           success: true,
           action: "requirements_summary",
@@ -1062,15 +1067,15 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         });
       }
 
-      const enrichedDescription = getEnrichedDescription();
-      const relevantFiles = searchIndex(enrichedDescription, 5);
+      const enrichedDescription = getEnrichedDescription(sessionKey);
+      const relevantFiles = searchIndex(sessionKey, enrichedDescription, 5);
 
       if (!relevantFiles || relevantFiles.length === 0) {
         try {
           const rawBlueprint = await generateBlueprint(enrichedDescription);
           const cleanedBlueprint = stripCodeFences(rawBlueprint);
           const blueprint = lenientJsonParse(cleanedBlueprint);
-          beginBlueprintConfirmation({ blueprint });
+          beginBlueprintConfirmation(sessionKey, { blueprint });
           return res.json({
             success: true,
             action: "architecture_blueprint",
@@ -1079,12 +1084,12 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           });
         } catch (err) {
           console.error("Blueprint generation failed, proceeding without it:", err.message);
-          clearClarification();
-          return generateAndReturnPlan(enrichedDescription, res);
+          clearClarification(sessionKey);
+          return generateAndReturnPlan(enrichedDescription, res, undefined, sessionKey);
         }
       }
 
-      beginArchitectureConfirmation({ relevantFiles });
+      beginArchitectureConfirmation(sessionKey, { relevantFiles });
       return res.json({
         success: true,
         action: "architecture_context_check",
@@ -1094,17 +1099,17 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     }
 
     if (phase === "architecture") {
-      let finalDescription = getEnrichedDescription();
+      let finalDescription = getEnrichedDescription(sessionKey);
       if (!isConfirmation) {
         finalDescription = finalDescription + "\n\nCorrection from the user about the existing repository structure (this overrides anything assumed above about which files already exist or where they live):\n" + trimmedPrompt;
-        setEnrichedDescription(finalDescription);
+        setEnrichedDescription(sessionKey, finalDescription);
       }
 
       try {
         const rawBlueprint = await generateBlueprint(finalDescription);
         const cleanedBlueprint = stripCodeFences(rawBlueprint);
         const blueprint = lenientJsonParse(cleanedBlueprint);
-        beginBlueprintConfirmation({ blueprint });
+        beginBlueprintConfirmation(sessionKey, { blueprint });
         return res.json({
           success: true,
           action: "architecture_blueprint",
@@ -1113,20 +1118,20 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         });
       } catch (err) {
         console.error("Blueprint generation failed, proceeding without it:", err.message);
-        clearClarification();
-        return generateAndReturnPlan(finalDescription, res);
+        clearClarification(sessionKey);
+        return generateAndReturnPlan(finalDescription, res, undefined, sessionKey);
       }
     }
     if (phase === "blueprint") {
       if (!isConfirmation) {
-        const correctedDescription = getEnrichedDescription() + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
-        setEnrichedDescription(correctedDescription);
+        const correctedDescription = getEnrichedDescription(sessionKey) + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
+        setEnrichedDescription(sessionKey, correctedDescription);
 
         try {
           const rawBlueprint = await generateBlueprint(correctedDescription);
           const cleanedBlueprint = stripCodeFences(rawBlueprint);
           const blueprint = lenientJsonParse(cleanedBlueprint);
-          beginBlueprintConfirmation({ blueprint });
+          beginBlueprintConfirmation(sessionKey, { blueprint });
           return res.json({
             success: true,
             action: "architecture_blueprint",
@@ -1135,17 +1140,17 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           });
         } catch (err) {
           console.error("Blueprint regeneration failed, proceeding without further revision:", err.message);
-          clearClarification();
-          return generateAndReturnPlan(correctedDescription, res);
+          clearClarification(sessionKey);
+          return generateAndReturnPlan(correctedDescription, res, undefined, sessionKey);
         }
       }
 
-      const enrichedDescription = getEnrichedDescription();
-      const blueprint = getBlueprint();
+      const enrichedDescription = getEnrichedDescription(sessionKey);
+      const blueprint = getBlueprint(sessionKey);
       const finalDescription = enrichedDescription + "\n\nAgreed architecture (technology choices below are binding, not suggestions):\n" + JSON.stringify(blueprint);
 
-      clearClarification();
-      return generateAndReturnPlan(finalDescription, res, blueprint);
+      clearClarification(sessionKey);
+      return generateAndReturnPlan(finalDescription, res, blueprint, sessionKey);
     }
 
 
@@ -1153,13 +1158,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     const skipPattern = /best judgment|you decide|not sure|don'?t know|^skip$|up to you|whatever you think|your call/i;
     const skipped = skipPattern.test(trimmedPrompt);
 
-    recordAnswer({ answer: trimmedPrompt, skipped });
+    recordAnswer(sessionKey, { answer: trimmedPrompt, skipped });
 
-    if (isComplete()) {
-      const summary = buildRequirementsSummary();
-      const pending = getPendingClarification();
-      setEnrichedDescription(pending.description + "\n\nRequirements summary:\n" + summary);
-      setPhase("summary");
+    if (isComplete(sessionKey)) {
+      const summary = buildRequirementsSummary(sessionKey);
+      const pending = getPendingClarification(sessionKey);
+      setEnrichedDescription(sessionKey, pending.description + "\n\nRequirements summary:\n" + summary);
+      setPhase(sessionKey, "summary");
 
       return res.json({
         success: true,
@@ -1169,11 +1174,11 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       });
     }
 
-    const clarification = getPendingClarification();
+    const clarification = getPendingClarification(sessionKey);
     return res.json({
       success: true,
       action: "clarification_question",
-      question: getCurrentQuestion(),
+      question: getCurrentQuestion(sessionKey),
       questionNumber: clarification.currentIndex + 1,
       totalQuestions: clarification.questions.length
     });
@@ -1191,7 +1196,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         reason: "No fact provided. Use: remember: some fact about this project"
       });
     }
-    const result = addFact(rememberCommand.fact);
+    const result = addFact(sessionKey, rememberCommand.fact);
     return res.json({
       success: true,
       action: "fact_remembered",
@@ -1203,56 +1208,56 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   const parsedCommand = parseWriteCommand(prompt);
   if (parsedCommand.isWriteCommand) {
-    return handleWriteCommand(parsedCommand, res);
+    return handleWriteCommand(parsedCommand, res, sessionKey);
   }
 
   const fixCommand = parseFixCommand(prompt);
   if (fixCommand.isFixCommand) {
-    return handleFixCommand(fixCommand, res);
+    return handleFixCommand(fixCommand, res, sessionKey);
   }
 
   const documentCommand = parseDocumentCommand(prompt);
   if (documentCommand.isDocumentCommand) {
-    return handleDocumentCommand(res);
+    return handleDocumentCommand(res, sessionKey);
   }
 
   const testCommand = parseTestCommand(prompt);
   if (testCommand.isTestCommand) {
-    return handleRunTestsCommand(res);
+    return handleRunTestsCommand(res, sessionKey);
   }
 
   const gitCommand = parseGitCommand(prompt);
   if (gitCommand.type === "status") {
-    return handleGitStatusCommand(res);
+    return handleGitStatusCommand(res, sessionKey);
   }
   if (gitCommand.type === "diff") {
-    return handleGitDiffCommand(res);
+    return handleGitDiffCommand(res, sessionKey);
   }
   if (gitCommand.type === "commit") {
-    return handleGitCommitCommand(res);
+    return handleGitCommitCommand(res, sessionKey);
   }
 
   const installCommand = parseInstallCommand(prompt);
   if (installCommand.isInstallCommand) {
-    return handleInstallCommand(installCommand, res);
+    return handleInstallCommand(installCommand, res, sessionKey);
   }
 
   const testGenCommand = parseTestGenerationCommand(prompt);
   if (testGenCommand.isTestGenerationCommand) {
-    return handleWriteTestsCommand(testGenCommand.targetPath, res);
+    return handleWriteTestsCommand(testGenCommand.targetPath, res, sessionKey);
   }
 
   const executePlanCommand = parseExecutePlanCommand(prompt);
   if (executePlanCommand.isExecutePlanCommand) {
-    return handleExecutePlanCommand(executePlanCommand, res);
+    return handleExecutePlanCommand(executePlanCommand, res, sessionKey);
   }
 
   const planCommand = parsePlanCommand(prompt);
   if (planCommand.isPlanCommand) {
-    return handlePlanCommand(planCommand, res);
+    return handlePlanCommand(planCommand, res, sessionKey);
   }
 
-  const fullPrompt = buildFullPrompt(prompt, history);
+  const fullPrompt = buildFullPrompt(prompt, history, sessionKey);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1299,6 +1304,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 });
 
 app.post("/api/write", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
   const { targetPath, content } = req.body;
 
   if (!targetPath || typeof content !== "string") {
@@ -1307,7 +1313,7 @@ app.post("/api/write", requireAuth, (req, res) => {
 
   // NEVER trust that a path was already validated in a previous request.
   // Re-check it fresh, here, right before any disk write happens.
-  const safetyCheck = isPathSafe(targetPath);
+  const safetyCheck = isPathSafe(sessionKey, targetPath);
 
   if (!safetyCheck.safe) {
     return res.status(400).json({
@@ -1319,7 +1325,7 @@ app.post("/api/write", requireAuth, (req, res) => {
   }
 
   try {
-    const backupPath = backupExistingFile(safetyCheck.resolvedPath, targetPath);
+    const backupPath = backupExistingFile(sessionKey, safetyCheck.resolvedPath, targetPath);
 
     fs.mkdirSync(path.dirname(safetyCheck.resolvedPath), { recursive: true });
     fs.writeFileSync(safetyCheck.resolvedPath, content, "utf-8");
@@ -1341,7 +1347,8 @@ app.post("/api/write", requireAuth, (req, res) => {
 });
 
 app.get("/api/plan/current", requireAuth, (req, res) => {
-  const plan = getPendingPlan();
+  const sessionKey = getSessionKey(req);
+  const plan = getPendingPlan(sessionKey);
   if (!plan) {
     return res.json({ success: false, reason: "No pending plan" });
   }
@@ -1349,17 +1356,18 @@ app.get("/api/plan/current", requireAuth, (req, res) => {
 });
 
 app.post("/api/plan/reject", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
   const { planId } = req.body;
 
-  if (!isValidPlanId(planId)) {
+  if (!isValidPlanId(sessionKey, planId)) {
     return res.status(400).json({ success: false, reason: "No matching pending plan to reject." });
   }
 
-  clearPlan();
+  clearPlan(sessionKey);
 
   let campaignCleared = false;
-  if (hasActiveCampaign()) {
-    clearCampaign();
+  if (hasActiveCampaign(sessionKey)) {
+    clearCampaign(sessionKey);
     campaignCleared = true;
   }
 
@@ -1367,13 +1375,14 @@ app.post("/api/plan/reject", requireAuth, (req, res) => {
 });
 
 app.post("/api/plan/approve", requireAuth, async (req, res) => {
+  const sessionKey = getSessionKey(req);
   const { planId } = req.body;
 
-  if (!isValidPlanId(planId)) {
+  if (!isValidPlanId(sessionKey, planId)) {
     return res.status(400).json({ success: false, reason: "No matching pending plan to approve." });
   }
 
-  const plan = getPendingPlan();
+  const plan = getPendingPlan(sessionKey);
 
   if (plan.stage !== "plan_proposed") {
     return res.status(400).json({
@@ -1391,12 +1400,12 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     // neither has been written to disk yet — the whole batch is one
     // unit of work, not written until the human approves and applies it.
     const batchSiblingPaths = plan.files
-      .map((f) => isPathSafe(f.path))
+      .map((f) => isPathSafe(sessionKey, f.path))
       .filter((check) => check.safe)
       .map((check) => check.resolvedPath);
 
     for (const file of plan.files) {
-      const safetyCheck = isPathSafe(file.path);
+      const safetyCheck = isPathSafe(sessionKey, file.path);
 
       if (!safetyCheck.safe) {
         return res.status(400).json({
@@ -1427,7 +1436,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
     const { checkImports } = require("./importChecker");
-    const importResult = checkImports(cleanedContent, safetyCheck.resolvedPath, batchSiblingPaths);
+    const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath, batchSiblingPaths);
     const { checkLint } = require("./lintChecker");
     const lintResult = checkLint(cleanedContent);
     const { runTestsAgainstProposal } = require("./testRunner");
@@ -1459,7 +1468,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       });
     }
 
-    const enrichResult = enrichWithDiffs(planId, enrichedFiles);
+    const enrichResult = enrichWithDiffs(sessionKey, planId, enrichedFiles);
 
     if (!enrichResult.success) {
       return res.status(400).json({ success: false, reason: enrichResult.reason });
@@ -1483,14 +1492,14 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
 // same project can skip re-asking about tech stack, platform, and
 // security that's already established, instead of treating every
 // incremental feature as a brand-new project from scratch.
-function saveArchitectureToMemory(description) {
+function saveArchitectureToMemory(description, sessionKey) {
   const match = description.match(/Agreed architecture \(technology choices below are binding, not suggestions\):\s*(\{[\s\S]*\})/);
   if (!match) return;
 
   try {
     const blueprint = lenientJsonParse(match[1]);
     const fact = `Established project architecture: ${blueprint.frontend} frontend, ${blueprint.backend} backend, ${blueprint.database} database, ${blueprint.authentication} authentication.`;
-    addFact(fact);
+    addFact(sessionKey, fact);
   } catch (err) {
     console.error("Could not save architecture to project memory:", err.message);
   }
@@ -1498,12 +1507,13 @@ function saveArchitectureToMemory(description) {
 
 app.post("/api/plan/apply", requireAuth, async (req, res) => {
   const { planId } = req.body;
+  const sessionKey = getSessionKey(req);
 
-  if (!isValidPlanId(planId)) {
+  if (!isValidPlanId(sessionKey, planId)) {
     return res.status(400).json({ success: false, reason: "No matching pending plan to apply." });
   }
 
-  const plan = getPendingPlan();
+  const plan = getPendingPlan(sessionKey);
 
   if (plan.stage !== "diffs_proposed") {
     return res.status(400).json({
@@ -1515,7 +1525,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
   const results = [];
 
   for (const file of plan.files) {
-    const safetyCheck = isPathSafe(file.path);
+    const safetyCheck = isPathSafe(sessionKey, file.path);
 
     if (!safetyCheck.safe) {
       return res.status(400).json({
@@ -1527,7 +1537,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     }
 
     try {
-      const backupPath = backupExistingFile(safetyCheck.resolvedPath, file.path);
+      const backupPath = backupExistingFile(sessionKey, safetyCheck.resolvedPath, file.path);
       fs.mkdirSync(path.dirname(safetyCheck.resolvedPath), { recursive: true });
       fs.writeFileSync(safetyCheck.resolvedPath, file.after, "utf-8");
 
@@ -1549,10 +1559,10 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
   }
 
   const appliedPaths = results.map((r) => r.path);
-  clearPlan();
-  saveArchitectureToMemory(plan.description);
+  clearPlan(sessionKey);
+  saveArchitectureToMemory(plan.description, sessionKey);
 
-  if (!hasActiveCampaign()) {
+  if (!hasActiveCampaign(sessionKey)) {
     return res.json({
       success: true,
       action: "plan_applied",
@@ -1560,19 +1570,19 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     });
   }
 
-  const campaignBefore = getActiveCampaign();
-  recordBatchCompletion(campaignBefore.id, appliedPaths);
+  const campaignBefore = getActiveCampaign(sessionKey);
+  recordBatchCompletion(sessionKey, campaignBefore.id, appliedPaths);
 
   try {
-    syncReindexWorkspace();
+    syncReindexWorkspace(sessionKey);
 
     const MAX_PLAN_FILES = 5;
-    const campaign = getActiveCampaign();
-    const { files: nextFiles, remainingCount } = takeNextBatch(campaign.id, MAX_PLAN_FILES);
+    const campaign = getActiveCampaign(sessionKey);
+    const { files: nextFiles, remainingCount } = takeNextBatch(sessionKey, campaign.id, MAX_PLAN_FILES);
 
     if (!Array.isArray(nextFiles) || nextFiles.length === 0) {
       const finishedCampaign = campaign;
-      clearCampaign();
+      clearCampaign(sessionKey);
       return res.json({
         success: true,
         action: "plan_applied",
@@ -1582,7 +1592,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
       });
     }
 
-    const nextPlan = createPlan({ description: campaign.description, files: nextFiles });
+    const nextPlan = createPlan(sessionKey, { description: campaign.description, files: nextFiles });
 
     return res.json({
       success: true,
@@ -1598,7 +1608,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Batch continuation failed:", err.message);
-    clearCampaign();
+    clearCampaign(sessionKey);
     return res.json({
       success: true,
       action: "plan_applied",
@@ -1609,8 +1619,9 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
 });
 
 app.get("/api/files", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
   try {
-    const tree = buildTree();
+    const tree = buildTree(sessionKey);
     res.json({ success: true, tree });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -1619,5 +1630,4 @@ app.get("/api/files", requireAuth, (req, res) => {
 
 app.listen(5000, () => {
   console.log("Taifa AI Backend running on port 5000");
-  startWatching();
 });
