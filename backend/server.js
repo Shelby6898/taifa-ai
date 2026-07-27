@@ -5,7 +5,7 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { getSessionKey } = require("./sessionKey");
-const { getWorkspaceDir } = require("./workspaceResolver");
+const { getWorkspaceDir, listProjectsForStudent } = require("./workspaceResolver");
 const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
@@ -1615,6 +1615,15 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
       filesWritten: results,
       campaignError: "Could not continue to the next batch automatically: " + err.message
     });
+  }
+});
+
+app.get("/api/projects", requireAuth, (req, res) => {
+  try {
+    const projects = listProjectsForStudent(req.userId);
+    res.json({ success: true, projects });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
