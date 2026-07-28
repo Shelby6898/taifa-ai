@@ -2,8 +2,13 @@ const { sanitizeKeyPart } = require("./sanitize");
 const { ensureWatching } = require("./fileIndexer");
 
 function getSessionKey(req) {
+  // GET requests can't carry a body in the browser's fetch API, so
+  // projectName may arrive as a query param instead — body takes
+  // priority when both are present (shouldn't normally happen).
+  const rawProjectName = (req.body && req.body.projectName) || req.query.projectName;
+
   const studentId = sanitizeKeyPart(req.userId);
-  const projectName = sanitizeKeyPart(req.body && req.body.projectName);
+  const projectName = sanitizeKeyPart(rawProjectName);
   const sessionKey = `${studentId}:${projectName}`;
 
   // Every request that resolves a session key also ensures that

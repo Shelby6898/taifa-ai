@@ -2,7 +2,7 @@ import { useState, useRef } from "react";
 import { authFetch } from "./authFetch";
 import FileTree from "./FileTree";
 
-function Chat() {
+function Chat({ currentProject }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -30,7 +30,7 @@ function Chat() {
       const response = await authFetch("http://localhost:5000/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: userMsg.content, history: messages })
+        body: JSON.stringify({ prompt: userMsg.content, history: messages, projectName: currentProject })
       });
 
       const contentType = response.headers.get("Content-Type") || "";
@@ -238,7 +238,8 @@ function Chat() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           targetPath: pendingWrite.targetPath,
-          content: pendingWrite.after
+          content: pendingWrite.after,
+          projectName: currentProject
         })
       });
 
@@ -272,7 +273,7 @@ function Chat() {
       const response = await authFetch("http://localhost:5000/api/plan/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: pendingPlan.planId })
+        body: JSON.stringify({ planId: pendingPlan.planId, projectName: currentProject })
       });
 
       const result = await response.json();
@@ -296,7 +297,7 @@ function Chat() {
       await authFetch("http://localhost:5000/api/plan/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: pendingPlan.planId })
+        body: JSON.stringify({ planId: pendingPlan.planId, projectName: currentProject })
       });
     } catch (err) {
       console.error("Reject plan failed:", err);
@@ -314,7 +315,7 @@ function Chat() {
       const response = await authFetch("http://localhost:5000/api/tool-action/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actionId: pendingToolAction.actionId })
+        body: JSON.stringify({ actionId: pendingToolAction.actionId, projectName: currentProject })
       });
 
       const result = await response.json();
@@ -341,7 +342,7 @@ function Chat() {
       await authFetch("http://localhost:5000/api/tool-action/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actionId: pendingToolAction.actionId })
+        body: JSON.stringify({ actionId: pendingToolAction.actionId, projectName: currentProject })
       });
     } catch (err) {
       console.error("Reject tool action failed:", err);
@@ -359,7 +360,7 @@ function Chat() {
       const response = await authFetch("http://localhost:5000/api/plan/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: pendingDiffs.planId })
+        body: JSON.stringify({ planId: pendingDiffs.planId, projectName: currentProject })
       });
 
       const result = await response.json();
@@ -398,7 +399,7 @@ function Chat() {
       await authFetch("http://localhost:5000/api/plan/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: pendingDiffs.planId })
+        body: JSON.stringify({ planId: pendingDiffs.planId, projectName: currentProject })
       });
     } catch (err) {
       console.error("Reject diffs failed:", err);
@@ -414,7 +415,7 @@ function Chat() {
         <h2 className="chat-title">
           Taifa <span className="accent">AI</span>
         </h2>
-        <FileTree />
+        <FileTree currentProject={currentProject} />
       </div>
 
       <div className="chat-log">

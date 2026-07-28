@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { authFetch } from "./authFetch";
 
 function TreeNode({ node, depth }) {
   const [expanded, setExpanded] = useState(depth === 0);
@@ -28,7 +29,7 @@ function TreeNode({ node, depth }) {
   );
 }
 
-function FileTree() {
+function FileTree({ currentProject }) {
   const [tree, setTree] = useState([]);
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(false);
@@ -36,7 +37,8 @@ function FileTree() {
   const loadTree = async () => {
     setLoading(true);
     try {
-      const response = await fetch("http://localhost:5000/api/files");
+      const url = `http://localhost:5000/api/files?projectName=${encodeURIComponent(currentProject)}`;
+      const response = await authFetch(url);
       const data = await response.json();
       if (data.success) {
         setTree(data.tree);
