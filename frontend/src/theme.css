@@ -300,3 +300,22 @@ input::placeholder, textarea::placeholder {
   font-weight: 600;
   white-space: nowrap;
 }
+
+.panel-blueprint { border-left-color: var(--accent); }
+
+.blueprint-fields { margin-bottom: 10px; }
+.blueprint-field {
+  display: flex;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.blueprint-field-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  min-width: 110px;
+  text-transform: lowercase;
+}
+.blueprint-field-value { color: var(--text); }

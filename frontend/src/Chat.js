@@ -9,28 +9,30 @@ function Chat({ currentProject }) {
   const [pendingWrite, setPendingWrite] = useState(null);
   const [writeStatus, setWriteStatus] = useState("");
   const [pendingPlan, setPendingPlan] = useState(null);
+  const [pendingBlueprint, setPendingBlueprint] = useState(null);
   const [pendingDiffs, setPendingDiffs] = useState(null);
   const [pendingToolAction, setPendingToolAction] = useState(null);
   const [toolActionStatus, setToolActionStatus] = useState("");
   const [planStatus, setPlanStatus] = useState("");
   const isSendingRef = useRef(false);
 
-  const sendMessage = async () => {
-    if (!input.trim() || isSendingRef.current) return;
+  const sendMessage = async (promptOverride) => {
+    const content = typeof promptOverride === "string" ? promptOverride : input;
+    if (!content.trim() || isSendingRef.current) return;
     isSendingRef.current = true;
     setIsStreaming(true);
     setWriteStatus("");
     setPlanStatus("");
 
-    const userMsg = { role: "user", content: input };
+    const userMsg = { role: "user", content };
     setMessages((prev) => [...prev, userMsg]);
-    setInput("");
+    if (typeof promptOverride !== "string") setInput("");
 
     try {
       const response = await authFetch("http://localhost:5000/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: userMsg.content, history: messages, projectName: currentProject })
+        body: JSON.stringify({ prompt: content, history: messages, projectName: currentProject })
       });
 
       const contentType = response.headers.get("Content-Type") || "";
@@ -69,21 +71,7 @@ function Chat({ currentProject }) {
             { role: "assistant", content: `${data.message}\n\n${data.summary}` }
           ]);
         } else if (data.action === "architecture_blueprint") {
-          const b = data.blueprint;
-          const lines = [
-            `Frontend: ${b.frontend}`,
-            `Backend: ${b.backend}`,
-            `Database: ${b.database}`,
-            `Authentication: ${b.authentication}`,
-            `Storage: ${b.storage}`,
-            `Collections: ${(b.collections || []).join(", ")}`,
-            `Modules: ${(b.modules || []).join(", ")}`,
-            `Estimated files: ${b.estimatedFiles}`
-          ].join("\n");
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `${data.message}\n\n${lines}` }
-          ]);
+          setPendingBlueprint(data);
         } else if (data.action === "fact_remembered") {
           setMessages((prev) => [
             ...prev,
@@ -307,6 +295,12 @@ function Chat({ currentProject }) {
     }
   };
 
+  const approveBlueprint = () => {
+    if (!pendingBlueprint) return;
+    setPendingBlueprint(null);
+    sendMessage("looks good");
+  };
+
   const approveToolAction = async () => {
     if (!pendingToolAction) return;
     setToolActionStatus("Running...");
@@ -419,7 +413,7 @@ function Chat({ currentProject }) {
       </div>
 
       <div className="chat-log">
-        {messages.length === 0 && !pendingWrite && !pendingPlan && !pendingDiffs && (
+        {messages.length === 0 && !pendingWrite && !pendingBlueprint && !pendingPlan && !pendingDiffs && (
           <p className="chat-empty">start a conversation...</p>
         )}
         {messages.map((m, i) => (
@@ -474,6 +468,26 @@ function Chat({ currentProject }) {
           <div className="panel-actions">
             <button onClick={approveWrite} className="btn-approve">approve</button>
             <button onClick={rejectWrite} className="btn-reject">reject</button>
+          </div>
+        </div>
+      )}
+
+      {pendingBlueprint && (
+        <div className="panel panel-blueprint">
+          <p className="panel-title">proposed architecture</p>
+          <div className="blueprint-fields">
+            <div className="blueprint-field"><span className="blueprint-field-label">frontend</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.frontend}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">backend</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.backend}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">database</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.database}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">authentication</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.authentication}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">storage</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.storage}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">collections</span><span className="blueprint-field-value">{(pendingBlueprint.blueprint.collections || []).join(", ")}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">modules</span><span className="blueprint-field-value">{(pendingBlueprint.blueprint.modules || []).join(", ")}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">estimated files</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.estimatedFiles}</span></div>
+          </div>
+          <p className="panel-hint">{pendingBlueprint.message}</p>
+          <div className="panel-actions">
+            <button onClick={approveBlueprint} className="btn-approve">looks good</button>
           </div>
         </div>
       )}
