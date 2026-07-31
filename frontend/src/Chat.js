@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { authFetch } from "./authFetch";
 import FileTree from "./FileTree";
 
@@ -15,6 +15,51 @@ function Chat({ currentProject }) {
   const [toolActionStatus, setToolActionStatus] = useState("");
   const [planStatus, setPlanStatus] = useState("");
   const isSendingRef = useRef(false);
+
+  useEffect(() => {
+    if (!currentProject) return;
+
+    const recoverSession = async () => {
+      try {
+        const url = `http://localhost:5000/api/session/current?projectName=${encodeURIComponent(currentProject)}`;
+        const response = await authFetch(url);
+        const data = await response.json();
+        if (!data.success || !data.pending) return;
+
+        if (data.pending === "toolAction") {
+          setPendingToolAction(data.data);
+        } else if (data.pending === "plan") {
+          setPendingPlan(data.data);
+        } else if (data.pending === "diffs") {
+          setPendingDiffs(data.data);
+        } else if (data.pending === "write") {
+          setPendingWrite(data.data);
+        } else if (data.pending === "architectureBlueprint") {
+          setPendingBlueprint(data.data);
+        } else if (data.pending === "clarificationQuestion") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `Question ${data.data.questionNumber} of ${data.data.totalQuestions}: ${data.data.question}` }
+          ]);
+        } else if (data.pending === "requirementsSummary") {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `${data.data.message}\n\n${data.data.summary}` }
+          ]);
+        } else if (data.pending === "architectureContextCheck") {
+          const fileList = data.data.relevantFiles.map((f) => `- ${f}`).join("\n");
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `${data.data.message}\n\n${fileList}` }
+          ]);
+        }
+      } catch (err) {
+        console.error("Failed to recover session state:", err);
+      }
+    };
+
+    recoverSession();
+  }, [currentProject]);
 
   const sendMessage = async (promptOverride) => {
     const content = typeof promptOverride === "string" ? promptOverride : input;
@@ -248,9 +293,18 @@ function Chat({ currentProject }) {
     }
   };
 
-  const rejectWrite = () => {
+  const rejectWrite = async () => {
     setPendingWrite(null);
     setWriteStatus("Write discarded — nothing was saved.");
+    try {
+      await authFetch("http://localhost:5000/api/write/reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectName: currentProject })
+      });
+    } catch (err) {
+      console.error("Failed to clear pending write:", err);
+    }
   };
 
   const approvePlan = async () => {

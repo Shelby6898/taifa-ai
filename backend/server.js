@@ -25,6 +25,7 @@ const { parseInstallCommand } = require("./installCommandParser");
 const { isGitRepo, getStatus, getDiff, commitChanges, detectRiskyPaths } = require("./gitTool");
 const { installPackage } = require("./packageManagerTool");
 const { hasPendingAction, getPendingAction, createPendingAction, isValidActionId, clearPendingAction } = require("./toolActionState");
+const { hasPendingWrite, getPendingWrite, createPendingWrite, clearPendingWrite } = require("./pendingWriteState");
 const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
@@ -271,6 +272,20 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
       }
     }
 
+    createPendingWrite(sessionKey, {
+      mode,
+      targetPath,
+      resolvedPath: safetyCheck.resolvedPath,
+      fileExists,
+      before: fileExists ? existingContent : "",
+      after: cleanedContent,
+      patchWarnings,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
+      lintCheck: lintResult,
+      testCheck
+    });
+
     return res.json({
       success: true,
       action: "propose_write",
@@ -416,6 +431,20 @@ async function handleWriteTestsCommand(targetPath, res, sessionKey) {
         testCheck
       });
     }
+
+    createPendingWrite(sessionKey, {
+      mode: testFileExists ? "edit" : "write",
+      targetPath: testFilePath,
+      resolvedPath: testSafetyCheck.resolvedPath,
+      fileExists: testFileExists,
+      before: testFileExists ? existingTestContent : "",
+      after: cleanedContent,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
+      lintCheck: lintResult,
+      testCheck,
+      isTestGeneration: true
+    });
 
     return res.json({
       success: true,
@@ -568,6 +597,21 @@ async function handleFixCommand(fixCommand, res, sessionKey) {
       }
     }
 
+    createPendingWrite(sessionKey, {
+      mode: "edit",
+      targetPath: relativePath,
+      resolvedPath: safetyCheck.resolvedPath,
+      fileExists: true,
+      before: existingContent,
+      after: cleanedContent,
+      patchWarnings,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
+      lintCheck: lintResult,
+      testCheck,
+      locationMethod
+    });
+
     return res.json({
       success: true,
       action: "propose_write",
@@ -629,6 +673,16 @@ async function handleDocumentCommand(res, sessionKey) {
   try {
     const rawGenerated = await generateDocumentation({ fullIndex });
     const cleanedContent = stripCodeFences(rawGenerated);
+
+    createPendingWrite(sessionKey, {
+      mode: fileExists ? "edit" : "write",
+      targetPath,
+      resolvedPath: safetyCheck.resolvedPath,
+      fileExists,
+      before: fileExists ? existingContent : "",
+      after: cleanedContent,
+      isDocumentation: true
+    });
 
     return res.json({
       success: true,
@@ -1332,6 +1386,7 @@ app.post("/api/write", requireAuth, (req, res) => {
 
     console.log(`[api/write] Wrote ${content.length} bytes to ${targetPath}`);
 
+    clearPendingWrite(sessionKey);
     return res.json({
       success: true,
       action: "write_complete",
@@ -1344,6 +1399,12 @@ app.post("/api/write", requireAuth, (req, res) => {
     console.error("[api/write] Write failed:", err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+app.post("/api/write/reject", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
+  clearPendingWrite(sessionKey);
+  res.json({ success: true, action: "write_rejected_ack" });
 });
 
 app.get("/api/plan/current", requireAuth, (req, res) => {
@@ -1635,6 +1696,77 @@ app.get("/api/files", requireAuth, (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+app.get("/api/session/current", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
+
+  if (hasPendingAction(sessionKey)) {
+    return res.json({ success: true, pending: "toolAction", data: getPendingAction(sessionKey) });
+  }
+
+  if (hasPendingPlan(sessionKey)) {
+    const plan = getPendingPlan(sessionKey);
+    if (plan.stage === "diffs_proposed") {
+      return res.json({ success: true, pending: "diffs", data: { planId: plan.id, files: plan.files } });
+    }
+    return res.json({ success: true, pending: "plan", data: { planId: plan.id, description: plan.description, files: plan.files } });
+  }
+
+  if (hasPendingWrite(sessionKey)) {
+    return res.json({ success: true, pending: "write", data: getPendingWrite(sessionKey) });
+  }
+
+  if (hasPendingClarification(sessionKey)) {
+    const clarification = getPendingClarification(sessionKey);
+    const phase = getPhase(sessionKey);
+
+    if (phase === "blueprint") {
+      return res.json({
+        success: true,
+        pending: "architectureBlueprint",
+        data: {
+          blueprint: clarification.blueprint,
+          message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
+        }
+      });
+    }
+
+    if (phase === "architecture") {
+      return res.json({
+        success: true,
+        pending: "architectureContextCheck",
+        data: {
+          relevantFiles: clarification.relevantFiles,
+          message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
+        }
+      });
+    }
+
+    if (phase === "summary") {
+      return res.json({
+        success: true,
+        pending: "requirementsSummary",
+        data: {
+          summary: clarification.summaryText,
+          message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or tell me what to add or change."
+        }
+      });
+    }
+
+    return res.json({
+      success: true,
+      pending: "clarificationQuestion",
+      data: {
+        question: getCurrentQuestion(sessionKey),
+        questionNumber: clarification.currentIndex + 1,
+        totalQuestions: clarification.questions.length,
+        usingProjectMemory: !!clarification.memoryContext
+      }
+    });
+  }
+
+  return res.json({ success: true, pending: null });
 });
 
 app.listen(5000, () => {
