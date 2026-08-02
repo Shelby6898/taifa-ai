@@ -26,6 +26,7 @@ const { isGitRepo, getStatus, getDiff, commitChanges, detectRiskyPaths } = requi
 const { installPackage } = require("./packageManagerTool");
 const { hasPendingAction, getPendingAction, createPendingAction, isValidActionId, clearPendingAction } = require("./toolActionState");
 const { hasPendingWrite, getPendingWrite, createPendingWrite, clearPendingWrite } = require("./pendingWriteState");
+const { loadHistory, appendUserTurn, appendAssistantTurn } = require("./conversationHistory");
 const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
@@ -149,6 +150,30 @@ function formatHistory(history) {
     return `${speaker}: ${msg.content}`;
   });
   return `Conversation history:\n${lines.join("\n")}\n\n`;
+}
+
+// A lightweight, model-facing summary of a response — feeds buildFullPrompt's
+// conversation-history block. Deliberately does NOT try to match the exact
+// wording the frontend shows the student; that's a separate job handled by
+// the frontend's own formatter reading the same raw `data` payload.
+function summarizeForModel(payload) {
+  if (payload.message) return payload.message;
+  if (payload.question) return payload.question;
+  if (payload.reason) return payload.reason;
+  if (payload.summary) return payload.summary;
+  return payload.action || "";
+}
+
+// Wraps res.json for every response inside the /api/chat handler chain so
+// each turn is persisted to server-side conversation history automatically,
+// without needing a manual appendAssistantTurn call at every response site.
+function sendChatResponse(res, sessionKey, payload) {
+  appendAssistantTurn(sessionKey, {
+    action: payload.action,
+    data: payload,
+    content: summarizeForModel(payload)
+  });
+  return res.json(payload);
 }
 
 function buildFullPrompt(userPrompt, history, sessionKey) {
@@ -1077,6 +1102,22 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const { prompt, history, projectName } = req.body;
   const sessionKey = getSessionKey(req);
 
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => {
+    if (payload && payload.action) {
+      appendAssistantTurn(sessionKey, {
+        action: payload.action,
+        data: payload,
+        content: summarizeForModel(payload)
+      });
+    }
+    return originalJson(payload);
+  };
+
+  if (prompt) {
+    appendUserTurn(sessionKey, prompt);
+  }
+
   if (!prompt) {
     return res.status(400).json({ success: false, error: "prompt is required" });
   }
@@ -1311,7 +1352,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return handlePlanCommand(planCommand, res, sessionKey);
   }
 
-  const fullPrompt = buildFullPrompt(prompt, history, sessionKey);
+  const fullPrompt = buildFullPrompt(prompt, loadHistory(sessionKey), sessionKey);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1767,6 +1808,12 @@ app.get("/api/session/current", requireAuth, (req, res) => {
   }
 
   return res.json({ success: true, pending: null });
+});
+
+app.get("/api/chat/history", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
+  const history = loadHistory(sessionKey);
+  res.json({ success: true, history });
 });
 
 app.listen(5000, () => {
