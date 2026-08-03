@@ -19,7 +19,26 @@ function Chat({ currentProject }) {
   useEffect(() => {
     if (!currentProject) return;
 
-    const recoverSession = async () => {
+    const restoreSession = async () => {
+      try {
+        const historyUrl = `http://localhost:5000/api/chat/history?projectName=${encodeURIComponent(currentProject)}`;
+        const historyResponse = await authFetch(historyUrl);
+        const historyData = await historyResponse.json();
+
+        if (historyData.success && historyData.history.length > 0) {
+          const skipActions = new Set(["propose_write", "plan_proposed", "architecture_blueprint", "commit_proposed", "install_proposed"]);
+          const restored = historyData.history
+            .filter((turn) => turn.role === "user" || !skipActions.has(turn.action))
+            .map((turn) => ({
+              role: turn.role,
+              content: turn.role === "user" ? turn.content : formatAssistantMessage(turn.data)
+            }));
+          setMessages(restored);
+        }
+      } catch (err) {
+        console.error("Failed to load conversation history:", err);
+      }
+
       try {
         const url = `http://localhost:5000/api/session/current?projectName=${encodeURIComponent(currentProject)}`;
         const response = await authFetch(url);
@@ -36,31 +55,82 @@ function Chat({ currentProject }) {
           setPendingWrite(data.data);
         } else if (data.pending === "architectureBlueprint") {
           setPendingBlueprint(data.data);
-        } else if (data.pending === "clarificationQuestion") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Question ${data.data.questionNumber} of ${data.data.totalQuestions}: ${data.data.question}` }
-          ]);
-        } else if (data.pending === "requirementsSummary") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `${data.data.message}\n\n${data.data.summary}` }
-          ]);
-        } else if (data.pending === "architectureContextCheck") {
-          const fileList = data.data.relevantFiles.map((f) => `- ${f}`).join("\n");
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `${data.data.message}\n\n${fileList}` }
-          ]);
         }
+        // clarificationQuestion/requirementsSummary/architectureContextCheck no
+        // longer need special-case reconstruction here — they're already part
+        // of the real history loaded above, since every /api/chat response is
+        // now persisted server-side.
       } catch (err) {
         console.error("Failed to recover session state:", err);
       }
     };
 
-    recoverSession();
+    restoreSession();
   }, [currentProject]);
 
+
+  // Turns a backend response payload into the plain-text content shown in
+  // the chat log. Used both live (right after a response arrives) and when
+  // restoring stored history on load, so there's exactly one place that
+  // decides what a message looks like — never two copies to keep in sync.
+  const formatAssistantMessage = (data) => {
+    if (data.action === "write_rejected") {
+      return `Write rejected: ${data.reason}`;
+    } else if (data.action === "plan_rejected") {
+      return `Plan rejected: ${data.reason}`;
+    } else if (data.action === "clarification_question") {
+      return `Question ${data.questionNumber} of ${data.totalQuestions}: ${data.question}`;
+    } else if (data.action === "architecture_context_check") {
+      const fileList = data.relevantFiles.map((f) => `- ${f}`).join("\n");
+      return `${data.message}\n\n${fileList}`;
+    } else if (data.action === "requirements_summary") {
+      return `${data.message}\n\n${data.summary}`;
+    } else if (data.action === "fact_remembered") {
+      return data.alreadyKnown
+        ? `Already remembered: "${data.fact}"`
+        : `Got it, I'll remember: "${data.fact}" (${data.totalFacts} facts stored)`;
+    } else if (data.action === "remember_rejected") {
+      return `Couldn't remember that: ${data.reason}`;
+    } else if (data.action === "tests_ran") {
+      const statusLine = data.passed ? "✅ Tests passed" : "❌ Tests failed";
+      const timeoutNote = data.timedOut ? " (timed out)" : "";
+      const output = [data.stdout, data.stderr].filter(Boolean).join("\n");
+      return `${statusLine}${timeoutNote} — ran in ${data.projectDir}\n\n${output}`;
+    } else if (data.action === "tests_not_found") {
+      return data.message;
+    } else if (data.action === "git_status" || data.action === "git_diff") {
+      return data.stdout + (data.stderr ? "\n" + data.stderr : "");
+    } else if (data.action === "git_commit_refused") {
+      return `🚫 ${data.message}`;
+    } else if (data.action === "git_not_repo" || data.action === "git_nothing_to_commit") {
+      return data.message;
+    } else if (data.action === "test_generation_refused") {
+      return `🚫 ${data.message}`;
+    } else if (data.action === "generation_refused") {
+      const detailLines = [`🚫 ${data.reason}`];
+      if (data.regressionWarnings && data.regressionWarnings.length > 0) {
+        detailLines.push("", "Possible regressions:");
+        data.regressionWarnings.forEach((w) => detailLines.push(`- ${w}`));
+      }
+      if (data.undeclaredDependencies && data.undeclaredDependencies.length > 0) {
+        detailLines.push("", "Undeclared dependencies:");
+        data.undeclaredDependencies.forEach((d) => detailLines.push(`- ${d}`));
+      }
+      if (data.packageVersionCheck && data.packageVersionCheck.invalidVersions && data.packageVersionCheck.invalidVersions.length > 0) {
+        detailLines.push("", "Invalid package versions:");
+        data.packageVersionCheck.invalidVersions.forEach((v) =>
+          detailLines.push(`- ${v.name}@${v.exactVersion} does not exist on the npm registry`)
+        );
+      }
+      if (data.testCheck && data.testCheck.hasTests && !data.testCheck.passed) {
+        detailLines.push("", "Test output:", data.testCheck.output || "(no output captured)");
+      }
+      return detailLines.join("\n");
+    } else if (data.action === "action_rejected") {
+      return `Action rejected: ${data.reason}`;
+    }
+    return `Error: ${data.reason || data.error || "Unknown error"}`;
+  };
   const sendMessage = async (promptOverride) => {
     const content = typeof promptOverride === "string" ? promptOverride : input;
     if (!content.trim() || isSendingRef.current) return;
@@ -89,126 +159,16 @@ function Chat({ currentProject }) {
           setPendingWrite(data);
         } else if (data.action === "plan_proposed") {
           setPendingPlan(data);
-        } else if (data.action === "write_rejected") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Write rejected: ${data.reason}` }
-          ]);
-        } else if (data.action === "plan_rejected") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Plan rejected: ${data.reason}` }
-          ]);
-        } else if (data.action === "clarification_question") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Question ${data.questionNumber} of ${data.totalQuestions}: ${data.question}` }
-          ]);
-        } else if (data.action === "architecture_context_check") {
-          const fileList = data.relevantFiles.map((f) => `- ${f}`).join("\n");
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `${data.message}\n\n${fileList}` }
-          ]);
-        } else if (data.action === "requirements_summary") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `${data.message}\n\n${data.summary}` }
-          ]);
         } else if (data.action === "architecture_blueprint") {
           setPendingBlueprint(data);
-        } else if (data.action === "fact_remembered") {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: data.alreadyKnown
-                ? `Already remembered: "${data.fact}"`
-                : `Got it, I'll remember: "${data.fact}" (${data.totalFacts} facts stored)`
-            }
-          ]);
-        } else if (data.action === "remember_rejected") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Couldn't remember that: ${data.reason}` }
-          ]);
-        } else if (data.action === "tests_ran") {
-          const statusLine = data.passed ? "✅ Tests passed" : "❌ Tests failed";
-          const timeoutNote = data.timedOut ? " (timed out)" : "";
-          const output = [data.stdout, data.stderr].filter(Boolean).join("\n");
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: `${statusLine}${timeoutNote} — ran in ${data.projectDir}\n\n${output}`
-            }
-          ]);
-        } else if (data.action === "tests_not_found") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: data.message }
-          ]);
-        } else if (data.action === "git_status" || data.action === "git_diff") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: data.stdout + (data.stderr ? "\n" + data.stderr : "") }
-          ]);
-        } else if (data.action === "git_commit_refused") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `🚫 ${data.message}` }
-          ]);
-        } else if (data.action === "git_not_repo" || data.action === "git_nothing_to_commit") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: data.message }
-          ]);
         } else if (data.action === "commit_proposed") {
           setPendingToolAction({ type: "commit", actionId: data.actionId, message: data.message, diffPreview: data.diffPreview });
         } else if (data.action === "install_proposed") {
           setPendingToolAction({ type: "install", actionId: data.actionId, packageName: data.packageName });
-        } else if (data.action === "test_generation_refused") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `🚫 ${data.message}` }
-          ]);
-        } else if (data.action === "generation_refused") {
-          const detailLines = [`🚫 ${data.reason}`];
-
-          if (data.regressionWarnings && data.regressionWarnings.length > 0) {
-            detailLines.push("", "Possible regressions:");
-            data.regressionWarnings.forEach((w) => detailLines.push(`- ${w}`));
-          }
-
-          if (data.undeclaredDependencies && data.undeclaredDependencies.length > 0) {
-            detailLines.push("", "Undeclared dependencies:");
-            data.undeclaredDependencies.forEach((d) => detailLines.push(`- ${d}`));
-          }
-
-          if (data.packageVersionCheck && data.packageVersionCheck.invalidVersions && data.packageVersionCheck.invalidVersions.length > 0) {
-            detailLines.push("", "Invalid package versions:");
-            data.packageVersionCheck.invalidVersions.forEach((v) =>
-              detailLines.push(`- ${v.name}@${v.exactVersion} does not exist on the npm registry`)
-            );
-          }
-
-          if (data.testCheck && data.testCheck.hasTests && !data.testCheck.passed) {
-            detailLines.push("", "Test output:", data.testCheck.output || "(no output captured)");
-          }
-
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: detailLines.join("\n") }
-          ]);
-        } else if (data.action === "action_rejected") {
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: `Action rejected: ${data.reason}` }
-          ]);
         } else {
           setMessages((prev) => [
             ...prev,
-            { role: "assistant", content: `Error: ${data.reason || data.error || "Unknown error"}` }
+            { role: "assistant", content: formatAssistantMessage(data) }
           ]);
         }
 
