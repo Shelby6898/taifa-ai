@@ -1358,6 +1358,10 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
 
+  let accumulatedResponse = "";
+  let ollamaBuffer = "";
+  let streamFinished = false;
+
   try {
     const response = await axios.post(
       `${OLLAMA_URL}/api/generate`,
@@ -1369,32 +1373,82 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       { responseType: "stream" }
     );
 
-    response.data.on("data", (chunk) => {
-      const lines = chunk.toString().split("\n").filter(Boolean);
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.response) {
-            res.write(`data: ${JSON.stringify({ token: parsed.response })}\n\n`);
-          }
-          if (parsed.done) {
-            res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-            res.end();
-          }
-        } catch (e) {
-          // partial JSON chunk from Ollama, ignore and wait for next chunk
+    const processOllamaLine = (line) => {
+      if (!line.trim() || streamFinished) return;
+
+      try {
+        const parsed = JSON.parse(line);
+
+        if (parsed.response) {
+          accumulatedResponse += parsed.response;
+          res.write(`data: ${JSON.stringify({ token: parsed.response })}\n\n`);
         }
+
+        if (parsed.done && !streamFinished) {
+          streamFinished = true;
+
+          appendAssistantTurn(sessionKey, {
+            action: "chat_reply",
+            data: { content: accumulatedResponse },
+            content: accumulatedResponse
+          });
+
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          res.end();
+        }
+      } catch (e) {
+        console.error("[Ollama] Failed to parse JSON:", e.message);
+      }
+    };
+
+    response.data.on("data", (chunk) => {
+      ollamaBuffer += chunk.toString();
+
+      const lines = ollamaBuffer.split("\n");
+      ollamaBuffer = lines.pop() || "";
+
+      for (const line of lines) {
+        processOllamaLine(line);
+      }
+    });
+
+    response.data.on("end", () => {
+      if (ollamaBuffer.trim() && !streamFinished) {
+        processOllamaLine(ollamaBuffer);
+      }
+
+      if (!streamFinished) {
+        streamFinished = true;
+
+        appendAssistantTurn(sessionKey, {
+          action: "chat_reply",
+          data: { content: accumulatedResponse },
+          content: accumulatedResponse
+        });
+
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
       }
     });
 
     response.data.on("error", (err) => {
       console.error("Ollama stream error:", err.message);
-      res.write(`data: ${JSON.stringify({ error: "Stream failed" })}\n\n`);
-      res.end();
+
+      if (!streamFinished) {
+        streamFinished = true;
+        res.write(`data: ${JSON.stringify({ error: "Stream failed" })}\n\n`);
+        res.end();
+      }
     });
   } catch (error) {
     console.error("Ollama request failed:", error.message);
-    res.status(500).json({ success: false, error: error.message });
+
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error.message });
+    } else {
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    }
   }
 });
 

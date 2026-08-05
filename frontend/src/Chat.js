@@ -31,7 +31,7 @@ function Chat({ currentProject }) {
             .filter((turn) => turn.role === "user" || !skipActions.has(turn.action))
             .map((turn) => ({
               role: turn.role,
-              content: turn.role === "user" ? turn.content : formatAssistantMessage(turn.data)
+              content: turn.role === "user" ? turn.content : turn.action === "chat_reply" ? turn.content : formatAssistantMessage({ ...turn.data, action: turn.action })
             }));
           setMessages(restored);
         }
@@ -74,7 +74,9 @@ function Chat({ currentProject }) {
   // restoring stored history on load, so there's exactly one place that
   // decides what a message looks like — never two copies to keep in sync.
   const formatAssistantMessage = (data) => {
-    if (data.action === "write_rejected") {
+    if (data.action === "chat_reply") {
+      return data.content;
+    } else if (data.action === "write_rejected") {
       return `Write rejected: ${data.reason}`;
     } else if (data.action === "plan_rejected") {
       return `Plan rejected: ${data.reason}`;
