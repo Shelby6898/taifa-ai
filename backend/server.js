@@ -31,7 +31,8 @@ const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
-const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign } = require("./planState");
+const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
+const { checkVocabularyConsistency, checkExcludedScope, checkMissingRequiredScope } = require("./planValidator");
 const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
 const { FIXED_PLANNING_QUESTIONS, SHORT_PLANNING_QUESTIONS } = require("./planningQuestions");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
@@ -85,7 +86,6 @@ function annotateStorageFiles(fileList, blueprint) {
 }
 
 async function generateBatchPlan({ description, completedFiles, blueprint }, sessionKey) {
-  const MAX_PLAN_FILES = 5;
   const fullIndex = formatFullIndex(sessionKey, description);
   const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
   const cleanedPlan = stripCodeFences(rawPlan);
@@ -104,16 +104,7 @@ async function generateBatchPlan({ description, completedFiles, blueprint }, ses
 
   const annotatedFiles = annotateStorageFiles(dedupedFiles, blueprint);
 
-  let droppedFiles = null;
-  let files = annotatedFiles;
-
-  if (files.length > MAX_PLAN_FILES) {
-    droppedFiles = files.slice(MAX_PLAN_FILES);
-    files = files.slice(0, MAX_PLAN_FILES);
-  }
-
-  const truncatedFiles = droppedFiles ? droppedFiles.map((f) => f.path) : null;
-  return { files, truncated: droppedFiles !== null, truncatedFiles, droppedFiles };
+  return { files: annotatedFiles };
 }
 
 const MAX_HISTORY_TURNS = 3;
@@ -997,13 +988,40 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
 // actual plan-generation logic.
 async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
   try {
-    const { files: parsedFiles, truncated, truncatedFiles, droppedFiles } = await generateBatchPlan({
-      description,
-      completedFiles: [],
-      blueprint
-    }, sessionKey);
+    const MAX_PLANNING_ROUNDS = 6; // safety ceiling: rounds of generateBatchPlan calls, not files
+    const estimatedFiles = (blueprint && blueprint.estimatedFiles) || null;
 
-    if (!Array.isArray(parsedFiles) || parsedFiles.length === 0) {
+    let allFiles = [];
+    let rounds = 0;
+
+    while (true) {
+      rounds += 1;
+      const { files: roundFiles } = await generateBatchPlan({
+        description,
+        completedFiles: allFiles.map((f) => f.path),
+        blueprint
+      }, sessionKey);
+
+      if (!Array.isArray(roundFiles) || roundFiles.length === 0) {
+        break; // model signaled done
+      }
+
+      const existingPaths = new Set(allFiles.map((f) => f.path));
+      const newFiles = roundFiles.filter((f) => !existingPaths.has(f.path));
+      allFiles = allFiles.concat(newFiles);
+
+      if (estimatedFiles && allFiles.length >= estimatedFiles) {
+        break; // reached the blueprint's estimated scope
+      }
+      if (newFiles.length === 0) {
+        break; // round produced nothing new — avoid an infinite loop
+      }
+      if (rounds >= MAX_PLANNING_ROUNDS) {
+        break; // safety ceiling hit
+      }
+    }
+
+    if (allFiles.length === 0) {
       return res.status(500).json({
         success: false,
         action: "plan_rejected",
@@ -1011,13 +1029,24 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       });
     }
 
+    const validationIssues = [
+      ...checkVocabularyConsistency(allFiles, blueprint),
+      ...checkExcludedScope(allFiles, description),
+      ...checkMissingRequiredScope(allFiles, description)
+    ];
+
+    const incomplete = estimatedFiles ? allFiles.length < estimatedFiles : false;
+
     let campaignInfo = null;
-    if (truncated) {
-      const campaign = startCampaign(sessionKey, { description, remainingFiles: droppedFiles });
+    let firstBatchFiles = allFiles;
+    if (allFiles.length > MAX_PLAN_FILES) {
+      const remainingFiles = allFiles.slice(MAX_PLAN_FILES);
+      firstBatchFiles = allFiles.slice(0, MAX_PLAN_FILES);
+      const campaign = startCampaign(sessionKey, { description, remainingFiles });
       campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
     }
 
-    const plan = createPlan(sessionKey, { description, files: parsedFiles });
+    const plan = createPlan(sessionKey, { description, files: firstBatchFiles });
 
     return res.json({
       success: true,
@@ -1025,8 +1054,10 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       planId: plan.id,
       description: plan.description,
       files: plan.files,
-      truncated,
-      truncatedFiles,
+      estimatedFiles,
+      planningRounds: rounds,
+      incomplete,
+      validationIssues,
       campaign: campaignInfo
     });
   } catch (err) {
@@ -1066,7 +1097,6 @@ function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
     });
   }
 
-  const MAX_PLAN_FILES = 5;
   let files = executePlanCommand.files;
   let droppedFiles = null;
   let truncated = false;
@@ -1732,7 +1762,6 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
   try {
     syncReindexWorkspace(sessionKey);
 
-    const MAX_PLAN_FILES = 5;
     const campaign = getActiveCampaign(sessionKey);
     const { files: nextFiles, remainingCount } = takeNextBatch(sessionKey, campaign.id, MAX_PLAN_FILES);
 

@@ -1,5 +1,7 @@
 const crypto = require("crypto");
 
+const MAX_PLAN_FILES = 5; // shared cap for how many files a single plan batch may contain
+
 const plans = new Map(); // sessionKey -> pending plan
 const campaigns = new Map(); // sessionKey -> active campaign
 
@@ -127,5 +129,6 @@ module.exports = {
   startCampaign,
   recordBatchCompletion,
   takeNextBatch,
-  clearCampaign
+  clearCampaign,
+  MAX_PLAN_FILES
 };
