@@ -393,10 +393,10 @@ Output ONLY a raw JSON object with exactly these fields, nothing else:
   "storage": "short string describing file/media storage, or 'none' if not needed",
   "collections": ["list", "of", "main", "data", "entities", "or", "tables"],
   "modules": ["list", "of", "main", "functional", "modules", "or", "features"],
-  "estimatedFiles": 20
+  "estimatedFiles": "<integer>"
 }
 
-The estimatedFiles field must be a realistic integer estimate of total files needed for a complete implementation, not a placeholder.
+The estimatedFiles value must be an actual integer in your output (not the literal string "<integer>" shown above), and it must be YOUR OWN realistic estimate for THIS SPECIFIC project's real scope. A small single-feature utility might need as few as 5-8 files; a large multi-role system might genuinely need 25-40. Do not default to any particular number — think about what this specific project actually requires, based on the modules and collections you just listed above.
 
 Do not wrap the JSON in markdown code fences. Do not include any explanation before or after the JSON.`;
 }

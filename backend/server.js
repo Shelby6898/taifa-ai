@@ -102,9 +102,13 @@ async function generateBatchPlan({ description, completedFiles, blueprint }, ses
     return true;
   });
 
-  const annotatedFiles = annotateStorageFiles(dedupedFiles, blueprint);
-
-  return { files: annotatedFiles };
+  // annotateStorageFiles previously stapled a "(uses X, per agreed
+  // architecture)" text suffix onto file descriptions here — cosmetic
+  // tagging with no real content check (confirmed via live evidence).
+  // checkVocabularyConsistency in planValidator.js now does the real
+  // check, against the plan's actual descriptions, so this call was
+  // removed as redundant/dead weight.
+  return { files: dedupedFiles };
 }
 
 const MAX_HISTORY_TURNS = 3;
@@ -1539,6 +1543,19 @@ app.get("/api/plan/current", requireAuth, (req, res) => {
     return res.json({ success: false, reason: "No pending plan" });
   }
   return res.json({ success: true, plan });
+});
+
+// Read-only debug/inspection endpoint: exposes the full active campaign,
+// including remainingFiles, which /api/plan/current does not surface
+// (it only shows the current batch). Useful for verifying multi-batch
+// plans in full rather than one batch at a time.
+app.get("/api/campaign/current", requireAuth, (req, res) => {
+  const sessionKey = getSessionKey(req);
+  const campaign = getActiveCampaign(sessionKey);
+  if (!campaign) {
+    return res.json({ success: false, reason: "No active campaign" });
+  }
+  return res.json({ success: true, campaign });
 });
 
 app.post("/api/plan/reject", requireAuth, (req, res) => {
