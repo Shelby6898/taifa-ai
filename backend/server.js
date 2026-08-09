@@ -10,7 +10,7 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint , generateDescriptionFix, generateTargetedAddition } = require("./generateFileContent");
 const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
 const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
@@ -998,13 +998,31 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
     let allFiles = [];
     let rounds = 0;
 
+    let roundFailures = 0;
+
     while (true) {
       rounds += 1;
-      const { files: roundFiles } = await generateBatchPlan({
-        description,
-        completedFiles: allFiles.map((f) => f.path),
-        blueprint
-      }, sessionKey);
+      let roundFiles;
+      try {
+        const result = await generateBatchPlan({
+          description,
+          completedFiles: allFiles.map((f) => f.path),
+          blueprint
+        }, sessionKey);
+        roundFiles = result.files;
+      } catch (err) {
+        roundFailures += 1;
+        console.error(`[planLoop] round ${rounds} failed (attempt ${roundFailures}):`, err.message);
+        if (roundFailures >= 2) {
+          // Two failures in a row — stop gracefully with whatever real
+          // progress has already been accumulated, rather than throwing
+          // away every prior successful round over one bad round's output.
+          break;
+        }
+        rounds -= 1; // this attempt didn't count as a real round; retry
+        continue;
+      }
+      roundFailures = 0; // reset on any successful round
 
       if (!Array.isArray(roundFiles) || roundFiles.length === 0) {
         break; // model signaled done
@@ -1033,11 +1051,93 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       });
     }
 
-    const validationIssues = [
+    let validationIssues = [
       ...checkVocabularyConsistency(allFiles, blueprint),
       ...checkExcludedScope(allFiles, description),
       ...checkMissingRequiredScope(allFiles, description)
     ];
+
+    // Auto-fix 1: excluded_scope issues are cheap to resolve — just drop the
+    // offending file(s) from the plan. No model call needed; removing a file
+    // that shouldn't exist doesn't require asking the model anything.
+    const excludedPaths = new Set(
+      validationIssues.filter((i) => i.type === "excluded_scope").map((i) => i.path)
+    );
+    if (excludedPaths.size > 0) {
+      allFiles = allFiles.filter((f) => !excludedPaths.has(f.path));
+      validationIssues = [
+        ...checkVocabularyConsistency(allFiles, blueprint),
+        ...checkExcludedScope(allFiles, description),
+        ...checkMissingRequiredScope(allFiles, description)
+      ];
+    }
+
+    // Auto-fix 2: vocabulary_inconsistency issues get a cheap single-file
+    // description rewrite — one small model call per flagged file, not a
+    // full replan. The file's real content/purpose doesn't change, only
+    // the wording of its description.
+    const vocabIssues = validationIssues.filter((i) => i.type === "vocabulary_inconsistency");
+    if (vocabIssues.length > 0 && blueprint && blueprint.database) {
+      for (const issue of vocabIssues) {
+        const fileIndex = allFiles.findIndex((f) => f.path === issue.path);
+        if (fileIndex === -1) continue;
+        try {
+          const fixedDescription = await generateDescriptionFix({
+            path: issue.path,
+            description: allFiles[fileIndex].description,
+            databaseName: blueprint.database,
+            issueDetail: issue.detail
+          });
+          if (fixedDescription) {
+            allFiles[fileIndex] = { ...allFiles[fileIndex], description: fixedDescription };
+          }
+        } catch (err) {
+          console.error(`[planValidator] description fix failed for ${issue.path}:`, err.message);
+          // Leave the original description in place; it'll still be flagged
+          // below by re-validation rather than silently swapped for nothing.
+        }
+      }
+      validationIssues = [
+        ...checkVocabularyConsistency(allFiles, blueprint),
+        ...checkExcludedScope(allFiles, description),
+        ...checkMissingRequiredScope(allFiles, description)
+      ];
+    }
+
+    // Auto-fix 3: missing_required_scope issues get a targeted addition —
+    // one extra generateBatchPlan-style call asking specifically for the
+    // missing area, not a full replan. completedFiles is passed so the
+    // model doesn't duplicate what's already planned.
+    const missingIssues = validationIssues.filter((i) => i.type === "missing_required_scope");
+    if (missingIssues.length > 0) {
+      for (const issue of missingIssues) {
+        const areaMatch = issue.detail.match(/require "([^"]+)"/);
+        const area = areaMatch ? areaMatch[1] : null;
+        if (!area) continue;
+        try {
+          const rawAddition = await generateTargetedAddition({
+            area,
+            blueprint,
+            existingPaths: allFiles.map((f) => f.path)
+          });
+          const cleanedAddition = stripCodeFences(rawAddition);
+          const additionFiles = lenientJsonParse(cleanedAddition);
+          console.log(`[planValidator] targeted addition for "${area}": model returned`, JSON.stringify(additionFiles));
+          if (Array.isArray(additionFiles) && additionFiles.length > 0) {
+            const existingPaths = new Set(allFiles.map((f) => f.path));
+            const newFiles = additionFiles.filter((f) => !existingPaths.has(f.path));
+            allFiles = allFiles.concat(newFiles);
+          }
+        } catch (err) {
+          console.error(`[planValidator] targeted addition failed for "${area}":`, err.message);
+        }
+      }
+      validationIssues = [
+        ...checkVocabularyConsistency(allFiles, blueprint),
+        ...checkExcludedScope(allFiles, description),
+        ...checkMissingRequiredScope(allFiles, description)
+      ];
+    }
 
     const incomplete = estimatedFiles ? allFiles.length < estimatedFiles : false;
 

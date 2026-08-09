@@ -378,6 +378,70 @@ async function generateTestFile(params) {
   return response.data.response;
 }
 
+function buildDescriptionFixPrompt({ path, description, databaseName, issueDetail }) {
+  return `You previously wrote this one-sentence description for a planned file:
+
+Path: ${path}
+Description: ${description}
+
+A mechanical check flagged a problem: ${issueDetail}
+
+Rewrite ONLY the description sentence so it correctly and consistently uses ${databaseName} terminology throughout (for example, say "table" and "row", not "document" or "collection"). Keep the same real content/purpose of the file — do not change what the file does, only fix the vocabulary.
+
+Output ONLY the corrected one-sentence description. Do not include the path, quotes, markdown, or any explanation.`;
+}
+
+async function generateDescriptionFix(params) {
+  const prompt = buildDescriptionFixPrompt(params);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false,
+    options: { num_predict: 200 }
+  });
+
+  return response.data.response.trim();
+}
+
+function buildTargetedAdditionPrompt({ area, blueprint, existingPaths }) {
+  const archLines = blueprint
+    ? Object.entries(blueprint)
+        .filter(([k]) => k !== "estimatedFiles")
+        .map(([k, v]) => `- ${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+        .join("\n")
+    : "";
+
+  return `You are adding files to an existing project plan to cover one specific missing area: "${area}".
+
+Project architecture (binding, not suggestions):
+${archLines}
+
+Files already planned (do NOT repeat any of these):
+${existingPaths.map((p) => `- ${p}`).join("\n")}
+
+Produce ONLY the file(s) genuinely needed to implement "${area}" specifically — nothing else, and do not skip this just because other areas already have files planned.
+
+Output a JSON array. Each item must have exactly two fields:
+- "path": a relative file path
+- "description": one short sentence, naming any specific technology from the architecture above by name where relevant
+
+Output ONLY the raw JSON array — no markdown fences, no explanation. If "${area}" genuinely needs at least one file (which it does, since it was explicitly required and is currently missing), the array must not be empty.`;
+}
+
+async function generateTargetedAddition(params) {
+  const prompt = buildTargetedAdditionPrompt(params);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false,
+    options: { num_predict: 800 }
+  });
+
+  return response.data.response;
+}
+
 function buildBlueprintPrompt(description) {
   return `Based on the following project requirements, produce a concise architecture blueprint.
 
@@ -430,5 +494,7 @@ module.exports = {
   buildClarifyingQuestionsPrompt,
   generateClarifyingQuestions,
   buildBlueprintPrompt,
-  generateBlueprint
+  generateBlueprint,
+  generateDescriptionFix,
+  generateTargetedAddition
 };
