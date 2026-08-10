@@ -19,6 +19,21 @@ function Chat({ currentProject }) {
   useEffect(() => {
     if (!currentProject) return;
 
+    // Reset all per-project UI state unconditionally before restoring —
+    // otherwise switching to a project with no history/pending state
+    // leaves the PREVIOUS project's messages/pending panels on screen,
+    // since the restore logic below only ever conditionally SETS state,
+    // never clears it when the new project has nothing to restore.
+    setMessages([]);
+    setPendingWrite(null);
+    setPendingPlan(null);
+    setPendingBlueprint(null);
+    setPendingDiffs(null);
+    setPendingToolAction(null);
+    setWriteStatus("");
+    setToolActionStatus("");
+    setPlanStatus("");
+
     const restoreSession = async () => {
       try {
         const historyUrl = `http://localhost:5000/api/chat/history?projectName=${encodeURIComponent(currentProject)}`;
