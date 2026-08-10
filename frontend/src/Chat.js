@@ -511,10 +511,24 @@ function Chat({ currentProject }) {
       {pendingPlan && (
         <div className="panel panel-plan">
           <p className="panel-title">proposed plan: {pendingPlan.description}</p>
-          {pendingPlan.truncated && (
-            <p className="panel-note panel-note-danger">
-              plan was truncated to 5 files. dropped: {pendingPlan.truncatedFiles?.join(", ")}
+          {typeof pendingPlan.estimatedFiles === "number" && (
+            <p className="panel-note">
+              {pendingPlan.incomplete
+                ? `plan is still in progress — more batches will follow this one (estimated ${pendingPlan.estimatedFiles} files total)`
+                : `plan complete (estimated ${pendingPlan.estimatedFiles} files)`}
             </p>
+          )}
+          {Array.isArray(pendingPlan.validationIssues) && pendingPlan.validationIssues.length > 0 && (
+            <div className="panel-note panel-note-danger">
+              <p>validator found {pendingPlan.validationIssues.length} issue(s) that could not be auto-fixed:</p>
+              <ul className="plan-validation-issues">
+                {pendingPlan.validationIssues.map((issue, i) => (
+                  <li key={i}>
+                    {issue.path ? <code>{issue.path}</code> : null} {issue.detail}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <div className="plan-files">
             {pendingPlan.files.map((f, i) => (
