@@ -8,6 +8,8 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [currentProject, setCurrentProject] = useState("");
   const [loadingProjects, setLoadingProjects] = useState(false);
+  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
 
   useEffect(() => {
     if (!loggedIn) return;
@@ -22,42 +24,9 @@ function App() {
           if (data.projects.length > 0) {
             setCurrentProject(data.projects[0]);
           } else {
-        const name = window.prompt("Name your first project:");
-
-        if (name && name.trim()) {
-          const trimmed = name.trim();
-
-          try {
-            const createResponse = await authFetch(
-              "http://localhost:5000/api/projects",
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  projectName: trimmed
-                })
-              }
-            );
-
-            const createData = await createResponse.json();
-
-            if (!createResponse.ok || !createData.success) {
-              window.alert(
-                createData.error || "Failed to create project."
-              );
-              return;
-            }
-
-            setProjects([createData.projectName]);
-            setCurrentProject(createData.projectName);
-          } catch (err) {
-            console.error("Failed to create first project:", err);
-            window.alert("Failed to create project.");
+            setNewProjectName("");
+            setShowNewProjectModal(true);
           }
-        }
-      }
         }
       } catch (err) {
         console.error("Failed to load projects:", err);
@@ -69,45 +38,49 @@ function App() {
     loadProjects();
   }, [loggedIn]);
 
-  const handleProjectChange = async (e) => {
-    if (e.target.value === "**new**") {
-      const name = window.prompt("New project name:");
-
-      if (!name || !name.trim()) {
-        return;
-      }
-
-      const trimmed = name.trim();
-
-      try {
-        const response = await authFetch("http://localhost:5000/api/projects", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            projectName: trimmed
-          })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || !data.success) {
-          window.alert(data.error || "Failed to create project.");
-          return;
-        }
-
-        setProjects((prev) => [...prev, data.projectName]);
-        setCurrentProject(data.projectName);
-      } catch (err) {
-        console.error("Failed to create project:", err);
-        window.alert("Failed to create project.");
-      }
-
+  const handleProjectChange = (e) => {
+    if (e.target.value === "__new__") {
+      setNewProjectName("");
+      setShowNewProjectModal(true);
       return;
     }
 
     setCurrentProject(e.target.value);
+  };
+
+  const handleCreateProject = async () => {
+    const trimmed = newProjectName.trim();
+
+    if (!trimmed) {
+      return;
+    }
+
+    try {
+      const response = await authFetch("http://localhost:5000/api/projects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          projectName: trimmed
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        window.alert(data.error || "Failed to create project.");
+        return;
+      }
+
+      setProjects((prev) => [...prev, data.projectName]);
+      setCurrentProject(data.projectName);
+      setShowNewProjectModal(false);
+      setNewProjectName("");
+    } catch (err) {
+      console.error("Failed to create project:", err);
+      window.alert("Failed to create project.");
+    }
   };
 
   const handleDeleteProject = async () => {
@@ -179,6 +152,67 @@ function App() {
         </button>
       </div>
       {currentProject && <Chat currentProject={currentProject} />}
+      {showNewProjectModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000
+          }}
+        >
+          <div
+            style={{
+              background: "#1a1a1a",
+              border: "1px solid #333",
+              borderRadius: 8,
+              padding: 24,
+              width: "90%",
+              maxWidth: 360
+            }}
+          >
+            <div style={{ marginBottom: 12, fontSize: 16 }}>
+              New project name
+            </div>
+            <input
+              type="text"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleCreateProject();
+                }
+              }}
+              autoFocus
+              style={{
+                width: "100%",
+                padding: 8,
+                marginBottom: 16,
+                boxSizing: "border-box"
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                onClick={() => {
+                  setShowNewProjectModal(false);
+                  setNewProjectName("");
+                }}
+              >
+                cancel
+              </button>
+              <button onClick={handleCreateProject}>
+                create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
