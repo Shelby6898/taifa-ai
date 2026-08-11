@@ -2003,6 +2003,18 @@ app.delete("/api/projects/:projectName", requireAuth, (req, res) => {
       });
     }
 
+    // Deletion is irreversible, so require explicit confirmation at the
+    // API level too — not just in the frontend's confirmation dialog.
+    // Protects against this endpoint ever being called directly (a
+    // script, a future agent, manual testing) without going through the
+    // UI's confirmation step.
+    if (req.query.confirm !== "true") {
+      return res.status(400).json({
+        success: false,
+        error: "Deletion requires ?confirm=true — this action is irreversible."
+      });
+    }
+
     const studentId = req.userId;
     const { sanitizeKeyPart } = require("./sanitize");
     const sessionKey = `${sanitizeKeyPart(studentId)}:${sanitizeKeyPart(projectName)}`;

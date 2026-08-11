@@ -125,7 +125,7 @@ function App() {
 
     try {
       const response = await authFetch(
-        `http://localhost:5000/api/projects/${encodeURIComponent(currentProject)}`,
+        `http://localhost:5000/api/projects/${encodeURIComponent(currentProject)}?confirm=true`,
         { method: "DELETE" }
       );
 

@@ -159,7 +159,7 @@ async function main() {
 
   const deleted = await request(
     "DELETE",
-    `/api/projects/${encodeURIComponent(PROJECT)}`
+    `/api/projects/${encodeURIComponent(PROJECT)}?confirm=true`
   );
 
   console.log(JSON.stringify(deleted.body, null, 2));
@@ -224,7 +224,7 @@ async function main() {
 
   const finalDelete = await request(
     "DELETE",
-    `/api/projects/${encodeURIComponent(PROJECT)}`
+    `/api/projects/${encodeURIComponent(PROJECT)}?confirm=true`
   );
 
   assert(finalDelete.status === 200, "Final cleanup deletion failed");

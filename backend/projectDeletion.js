@@ -23,15 +23,11 @@ const MEMORY_DIR = path.join(
   "memory"
 );
 
-const MEMORY_PREFIXES = [
-  "conversationHistory-",
-  "fileIndex-",
-  "importGraph-",
-  "functionIndex-",
-  "componentGraph-",
-  "dbSchema-"
-];
-
+// Matches any per-session file by its shared suffix pattern
+// (`<studentPart>__<projectPart>.json`), regardless of which subsystem's
+// prefix it uses. This means a future subsystem that adds its own
+// per-session file under memory/ gets cleaned up automatically on project
+// deletion, without needing a hardcoded prefix list kept in sync by hand.
 function deleteProjectMemoryIndexes(sessionKey) {
   const [rawStudentId, rawProjectName] = sessionKey.split(":");
 
@@ -47,18 +43,14 @@ function deleteProjectMemoryIndexes(sessionKey) {
   }
 
   const deletedFiles = [];
+  const suffix = `${studentPart}__${projectPart}.json`;
 
   if (!fs.existsSync(MEMORY_DIR)) {
     return deletedFiles;
   }
 
   for (const file of fs.readdirSync(MEMORY_DIR)) {
-    const matches = MEMORY_PREFIXES.some(
-      (prefix) =>
-        file === `${prefix}${studentPart}__${projectPart}.json`
-    );
-
-    if (!matches) {
+    if (!file.endsWith(suffix)) {
       continue;
     }
 
