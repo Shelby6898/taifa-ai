@@ -151,7 +151,7 @@ function App() {
           logout
         </button>
       </div>
-      {currentProject && <Chat currentProject={currentProject} />}
+      {currentProject && <Chat key={currentProject} currentProject={currentProject} />}
       {showNewProjectModal && (
         <div
           style={{
