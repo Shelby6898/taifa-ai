@@ -58,4 +58,16 @@ function formatMemoryBlock(sessionKey) {
   return `Project memory (persistent facts about this project):\n${facts.map((f) => `- ${f}`).join("\n")}\n\n`;
 }
 
-module.exports = { addFact, getAllFacts, formatMemoryBlock };
+function clearMemory(sessionKey) {
+  const memoryPath = memoryPathFor(sessionKey);
+
+  if (!fs.existsSync(memoryPath)) {
+    return false;
+  }
+
+  fs.unlinkSync(memoryPath);
+  console.log(`[projectMemory] Deleted memory for ${sessionKey}`);
+  return true;
+}
+
+module.exports = { addFact, getAllFacts, formatMemoryBlock, clearMemory };

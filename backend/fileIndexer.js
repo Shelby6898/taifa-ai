@@ -239,7 +239,13 @@ function ensureWatching(sessionKey) {
   }
 
   const workspaceDir = getWorkspaceDir(sessionKey);
-  fs.mkdirSync(workspaceDir, { recursive: true });
+
+  if (!fs.existsSync(workspaceDir)) {
+    console.log(
+      `[fileIndexer] Workspace does not exist; watcher not started for ${sessionKey}`
+    );
+    return null;
+  }
 
   const watcher = chokidar.watch(workspaceDir, {
     ignored: (filePath) => {
@@ -265,10 +271,9 @@ function ensureWatching(sessionKey) {
 
 // Periodic sweep: closes and removes any watcher that's been idle past
 // IDLE_TIMEOUT_MS. Nothing is lost when this happens — the index/graph
-// files stay on disk, and ensureWatching() will transparently recreate
-// the watcher (with a small rebuild cost) the next time that student
-// sends a request. This is what keeps memory/battery use bounded to
-// "students actually active right now" rather than growing forever.
+// files stay on disk, and ensureWatching() can recreate the watcher
+// (with a small rebuild cost) when the student becomes active again.
+// A missing workspace is never recreated by the watcher layer.
 function sweepIdleWatchers() {
   const now = Date.now();
   for (const [sessionKey, entry] of activeWatchers.entries()) {
@@ -282,4 +287,19 @@ function sweepIdleWatchers() {
 
 setInterval(sweepIdleWatchers, SWEEP_INTERVAL_MS);
 
-module.exports = { buildIndex, loadIndex, searchIndex, formatFullIndex, debouncedRebuild, ensureWatching };
+function stopWatching(sessionKey) {
+  const timer = debounceTimers.get(sessionKey);
+  if (timer) {
+    clearTimeout(timer);
+    debounceTimers.delete(sessionKey);
+  }
+
+  const entry = activeWatchers.get(sessionKey);
+  if (entry) {
+    entry.watcher.close();
+    activeWatchers.delete(sessionKey);
+    console.log(`[fileIndexer] Stopped watcher for ${sessionKey}`);
+  }
+}
+
+module.exports = { buildIndex, loadIndex, searchIndex, formatFullIndex, debouncedRebuild, ensureWatching, stopWatching };

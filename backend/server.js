@@ -5,7 +5,11 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const { getSessionKey } = require("./sessionKey");
-const { getWorkspaceDir, listProjectsForStudent } = require("./workspaceResolver");
+const {
+  getWorkspaceDir,
+  ensureWorkspace,
+  listProjectsForStudent
+} = require("./workspaceResolver");
 const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
@@ -38,6 +42,7 @@ const { FIXED_PLANNING_QUESTIONS, SHORT_PLANNING_QUESTIONS } = require("./planni
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
+const { deleteProject } = require("./projectDeletion");
 
 const app = express();
 
@@ -1201,23 +1206,30 @@ function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
     });
   }
 
-  let files = executePlanCommand.files;
-  let droppedFiles = null;
-  let truncated = false;
+  const allFiles = executePlanCommand.files;
+  const estimatedFiles = allFiles.length;
 
-  if (files.length > MAX_PLAN_FILES) {
-    droppedFiles = files.slice(MAX_PLAN_FILES);
-    files = files.slice(0, MAX_PLAN_FILES);
-    truncated = true;
-  }
+  // No blueprint exists for human-supplied plans (executePlanCommandParser
+  // only parses description + files), so checkVocabularyConsistency is
+  // skipped — it no-ops gracefully without a blueprint anyway. The other
+  // two checks only need description + files, both available here, so a
+  // human can still be caught forgetting an explicitly-required area or
+  // including an explicitly-excluded one, same as an AI-generated plan.
+  const validationIssues = [
+    ...checkExcludedScope(allFiles, executePlanCommand.description),
+    ...checkMissingRequiredScope(allFiles, executePlanCommand.description)
+  ];
 
   let campaignInfo = null;
-  if (truncated) {
-    const campaign = startCampaign(sessionKey, { description: executePlanCommand.description, remainingFiles: droppedFiles });
+  let firstBatchFiles = allFiles;
+  if (allFiles.length > MAX_PLAN_FILES) {
+    const remainingFiles = allFiles.slice(MAX_PLAN_FILES);
+    firstBatchFiles = allFiles.slice(0, MAX_PLAN_FILES);
+    const campaign = startCampaign(sessionKey, { description: executePlanCommand.description, remainingFiles });
     campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
   }
 
-  const plan = createPlan(sessionKey, { description: executePlanCommand.description, files });
+  const plan = createPlan(sessionKey, { description: executePlanCommand.description, files: firstBatchFiles });
 
   return res.json({
     success: true,
@@ -1225,8 +1237,9 @@ function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
     planId: plan.id,
     description: plan.description,
     files: plan.files,
-    truncated,
-    truncatedFiles: droppedFiles ? droppedFiles.map((f) => f.path) : null,
+    estimatedFiles,
+    incomplete: allFiles.length > MAX_PLAN_FILES,
+    validationIssues,
     campaign: campaignInfo,
     isHumanSupplied: true
   });
@@ -1916,6 +1929,92 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
       action: "plan_applied",
       filesWritten: results,
       campaignError: "Could not continue to the next batch automatically: " + err.message
+    });
+  }
+});
+
+app.post("/api/projects", requireAuth, (req, res) => {
+  try {
+    const rawProjectName = req.body && req.body.projectName;
+
+    if (typeof rawProjectName !== "string" || !rawProjectName.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Project name is required"
+      });
+    }
+
+    const { sanitizeKeyPart } = require("./sanitize");
+    const studentId = sanitizeKeyPart(req.userId);
+    const projectName = sanitizeKeyPart(rawProjectName.trim());
+
+    if (!studentId || !projectName) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid project name"
+      });
+    }
+
+    const existingProjects = listProjectsForStudent(req.userId);
+
+    if (existingProjects.includes(projectName)) {
+      return res.status(409).json({
+        success: false,
+        error: "Project already exists",
+        projectName
+      });
+    }
+
+    const sessionKey = `${studentId}:${projectName}`;
+
+    // Project creation is the ONLY place that intentionally
+    // creates a new workspace directory.
+    const workspaceDir = ensureWorkspace(sessionKey);
+
+    // Now that the workspace exists, start its watcher.
+    const { ensureWatching } = require("./fileIndexer");
+    ensureWatching(sessionKey);
+
+    return res.status(201).json({
+      success: true,
+      projectName,
+      workspaceCreated: true,
+      workspaceDir,
+      message: `Project "${projectName}" created successfully`
+    });
+  } catch (err) {
+    console.error("[projectCreation] Failed:", err);
+
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+app.delete("/api/projects/:projectName", requireAuth, (req, res) => {
+  try {
+    const projectName = req.params.projectName;
+
+    if (!projectName) {
+      return res.status(400).json({
+        success: false,
+        error: "Project name is required"
+      });
+    }
+
+    const studentId = req.userId;
+    const { sanitizeKeyPart } = require("./sanitize");
+    const sessionKey = `${sanitizeKeyPart(studentId)}:${sanitizeKeyPart(projectName)}`;
+
+    const result = deleteProject(sessionKey);
+
+    return res.json(result);
+  } catch (err) {
+    console.error("[projectDeletion] Failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message
     });
   }
 });

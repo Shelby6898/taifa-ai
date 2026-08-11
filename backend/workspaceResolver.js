@@ -9,11 +9,17 @@ const WORKSPACES_ROOT = path.join(__dirname, "..", "workspace");
 // rather than re-sanitizing.
 function getWorkspaceDir(sessionKey) {
   const [studentId, projectName] = sessionKey.split(":");
-  const dir = path.join(WORKSPACES_ROOT, studentId, projectName);
 
-  // Lazy creation — matches the "fresh empty directory" decision.
+  return path.join(
+    WORKSPACES_ROOT,
+    studentId,
+    projectName
+  );
+}
+
+function ensureWorkspace(sessionKey) {
+  const dir = getWorkspaceDir(sessionKey);
   fs.mkdirSync(dir, { recursive: true });
-
   return dir;
 }
 
@@ -35,4 +41,9 @@ function listProjectsForStudent(studentId) {
     .map((entry) => entry.name);
 }
 
-module.exports = { getWorkspaceDir, listProjectsForStudent, WORKSPACES_ROOT };
+module.exports = {
+  getWorkspaceDir,
+  ensureWorkspace,
+  listProjectsForStudent,
+  WORKSPACES_ROOT
+};
