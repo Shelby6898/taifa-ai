@@ -1029,7 +1029,10 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       }
       roundFailures = 0; // reset on any successful round
 
+      console.log(`[planLoop] round ${rounds} succeeded: ${Array.isArray(roundFiles) ? roundFiles.length : 0} file(s) returned`);
+
       if (!Array.isArray(roundFiles) || roundFiles.length === 0) {
+        console.log("[planLoop] stopping: model returned empty/no files (genuine completion signal)");
         break; // model signaled done
       }
 
@@ -1038,12 +1041,15 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       allFiles = allFiles.concat(newFiles);
 
       if (estimatedFiles && allFiles.length >= estimatedFiles) {
+        console.log(`[planLoop] stopping: reached estimatedFiles (${allFiles.length}/${estimatedFiles})`);
         break; // reached the blueprint's estimated scope
       }
       if (newFiles.length === 0) {
+        console.log("[planLoop] stopping: round produced nothing new");
         break; // round produced nothing new — avoid an infinite loop
       }
       if (rounds >= MAX_PLANNING_ROUNDS) {
+        console.log(`[planLoop] stopping: hit MAX_PLANNING_ROUNDS ceiling (${rounds})`);
         break; // safety ceiling hit
       }
     }
