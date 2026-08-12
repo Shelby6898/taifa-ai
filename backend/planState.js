@@ -1,9 +1,99 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { sanitizeKeyPart } = require("./sanitize");
 
 const MAX_PLAN_FILES = 5; // shared cap for how many files a single plan batch may contain
 
 const plans = new Map(); // sessionKey -> pending plan
 const campaigns = new Map(); // sessionKey -> active campaign
+
+// --- Disk persistence ---
+//
+// plans/campaigns previously lived only in memory, so a server restart
+// silently wiped any in-flight plan or multi-batch campaign, even though
+// the underlying project files, memory indexes, etc. all survive restarts.
+// Each entry is persisted as its own JSON file (matching the pattern used
+// by projectMemory.js / fileIndexer.js) and reloaded on module load.
+
+const PLAN_STATE_DIR = path.join(__dirname, "memory", "planState");
+
+function ensurePlanStateDir() {
+  if (!fs.existsSync(PLAN_STATE_DIR)) {
+    fs.mkdirSync(PLAN_STATE_DIR, { recursive: true });
+  }
+}
+
+function fileKeyFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return `${sanitizeKeyPart(studentId)}__${sanitizeKeyPart(projectName)}`;
+}
+
+function planFilePath(sessionKey) {
+  return path.join(PLAN_STATE_DIR, `plan-${fileKeyFor(sessionKey)}.json`);
+}
+
+function campaignFilePath(sessionKey) {
+  return path.join(PLAN_STATE_DIR, `campaign-${fileKeyFor(sessionKey)}.json`);
+}
+
+function persistPlan(sessionKey, plan) {
+  ensurePlanStateDir();
+  fs.writeFileSync(
+    planFilePath(sessionKey),
+    JSON.stringify({ sessionKey, plan }, null, 2)
+  );
+}
+
+function removePersistedPlan(sessionKey) {
+  const fp = planFilePath(sessionKey);
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp);
+  }
+}
+
+function persistCampaign(sessionKey, campaign) {
+  ensurePlanStateDir();
+  fs.writeFileSync(
+    campaignFilePath(sessionKey),
+    JSON.stringify({ sessionKey, campaign }, null, 2)
+  );
+}
+
+function removePersistedCampaign(sessionKey) {
+  const fp = campaignFilePath(sessionKey);
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp);
+  }
+}
+
+function loadPersistedState() {
+  if (!fs.existsSync(PLAN_STATE_DIR)) {
+    return;
+  }
+
+  for (const file of fs.readdirSync(PLAN_STATE_DIR)) {
+    const filePath = path.join(PLAN_STATE_DIR, file);
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+
+      if (file.startsWith("plan-") && parsed.sessionKey && parsed.plan) {
+        plans.set(parsed.sessionKey, parsed.plan);
+      } else if (file.startsWith("campaign-") && parsed.sessionKey && parsed.campaign) {
+        campaigns.set(parsed.sessionKey, parsed.campaign);
+      }
+    } catch (err) {
+      console.error(`[planState] Failed to load ${file}:`, err.message);
+    }
+  }
+
+  if (plans.size > 0 || campaigns.size > 0) {
+    console.log(
+      `[planState] Restored ${plans.size} pending plan(s), ${campaigns.size} active campaign(s) from disk`
+    );
+  }
+}
 
 function hasPendingPlan(sessionKey) {
   return plans.has(sessionKey);
@@ -24,6 +114,7 @@ function createPlan(sessionKey, { description, files }) {
   };
 
   plans.set(sessionKey, plan);
+  persistPlan(sessionKey, plan);
   return plan;
 }
 
@@ -36,11 +127,14 @@ function enrichWithDiffs(sessionKey, planId, enrichedFiles) {
   plan.files = enrichedFiles; // [{ path, description, before, after }]
   plan.stage = "diffs_proposed";
 
+  persistPlan(sessionKey, plan);
+
   return { success: true, plan };
 }
 
 function clearPlan(sessionKey) {
   plans.delete(sessionKey);
+  removePersistedPlan(sessionKey);
 }
 
 function isValidPlanId(sessionKey, planId) {
@@ -79,6 +173,7 @@ function startCampaign(sessionKey, { description, remainingFiles }) {
   };
 
   campaigns.set(sessionKey, campaign);
+  persistCampaign(sessionKey, campaign);
   return campaign;
 }
 
@@ -90,6 +185,8 @@ function recordBatchCompletion(sessionKey, campaignId, filePaths) {
 
   campaign.completedFiles = campaign.completedFiles.concat(filePaths);
   campaign.batchNumber += 1;
+
+  persistCampaign(sessionKey, campaign);
 
   return { success: true, campaign };
 }
@@ -106,6 +203,8 @@ function takeNextBatch(sessionKey, campaignId, maxFiles) {
   const batch = campaign.remainingFiles.slice(0, maxFiles);
   campaign.remainingFiles = campaign.remainingFiles.slice(maxFiles);
 
+  persistCampaign(sessionKey, campaign);
+
   return {
     success: true,
     files: batch,
@@ -115,7 +214,10 @@ function takeNextBatch(sessionKey, campaignId, maxFiles) {
 
 function clearCampaign(sessionKey) {
   campaigns.delete(sessionKey);
+  removePersistedCampaign(sessionKey);
 }
+
+loadPersistedState();
 
 module.exports = {
   hasPendingPlan,
