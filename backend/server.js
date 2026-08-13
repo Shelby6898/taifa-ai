@@ -1515,6 +1515,45 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return handlePlanCommand(planCommand, res, sessionKey);
   }
 
+  // Guard against a real safety gap: none of the specific command parsers
+  // above matched, but if something is genuinely pending resolution via a
+  // dedicated button (plan, diffs, clarification, tool action, write),
+  // falling through to open-ended model chat risks the model hallucinating
+  // a plausible-sounding but false confirmation, for text that merely
+  // resembles a button label without matching it exactly. Caught live:
+  // typing "apply all" or "approve plan" as free text while a plan was
+  // genuinely pending produced exactly this kind of false confirmation.
+  if (hasPendingAction(sessionKey)) {
+    return res.status(400).json({
+      success: false,
+      action: "pending_action_unresolved",
+      reason: "There's a pending action awaiting your decision. Please use the approve/reject buttons above rather than typing a reply."
+    });
+  }
+  if (hasPendingWrite(sessionKey)) {
+    return res.status(400).json({
+      success: false,
+      action: "pending_action_unresolved",
+      reason: "There's a pending file write awaiting your decision. Please use the approve/reject buttons above rather than typing a reply."
+    });
+  }
+  if (hasPendingPlan(sessionKey)) {
+    const pendingPlan = getPendingPlan(sessionKey);
+    const stageLabel = pendingPlan.stage === "diffs_proposed" ? "diffs" : "plan";
+    return res.status(400).json({
+      success: false,
+      action: "pending_action_unresolved",
+      reason: "There's a pending " + stageLabel + " awaiting your decision. Please use the approve/reject buttons above rather than typing a reply."
+    });
+  }
+  if (hasPendingClarification(sessionKey)) {
+    return res.status(400).json({
+      success: false,
+      action: "pending_action_unresolved",
+      reason: "There's a pending question or confirmation awaiting your reply. Please answer it directly, or use the button above if one is shown."
+    });
+  }
+
   const fullPrompt = buildFullPrompt(prompt, loadHistory(sessionKey), sessionKey);
 
   res.setHeader("Content-Type", "text/event-stream");
