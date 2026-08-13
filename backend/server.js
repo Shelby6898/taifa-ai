@@ -90,6 +90,16 @@ function annotateStorageFiles(fileList, blueprint) {
   });
 }
 
+// The model occasionally echoes the field labels it was given back into
+// the content itself, producing "Path: <path>\nDescription: <real text>"
+// instead of just the real text. Strips that redundant echo when present,
+// leaving the description untouched otherwise. Deterministic, no model call.
+function cleanDescription(description) {
+  if (typeof description !== "string") return description;
+  const match = description.match(/^Path:\s*.*?\n\s*Description:\s*(.*)$/is);
+  return match ? match[1].trim() : description;
+}
+
 async function generateBatchPlan({ description, completedFiles, blueprint }, sessionKey) {
   const fullIndex = formatFullIndex(sessionKey, description);
   const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
@@ -105,7 +115,7 @@ async function generateBatchPlan({ description, completedFiles, blueprint }, ses
     if (seenPaths.has(f.path)) return false;
     seenPaths.add(f.path);
     return true;
-  });
+  }).map((f) => ({ ...f, description: cleanDescription(f.description) }));
 
   // annotateStorageFiles previously stapled a "(uses X, per agreed
   // architecture)" text suffix onto file descriptions here — cosmetic
