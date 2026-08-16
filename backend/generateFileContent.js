@@ -460,6 +460,10 @@ Output ONLY a raw JSON object with exactly these fields, nothing else:
   "estimatedFiles": "<integer>"
 }
 
+CRITICAL — this blueprint is treated as binding downstream, not a suggestion, so precision matters:
+- For "frontend", "backend", "database", and "authentication": use the user's EXACT wording from the requirements above, word for word. Do not compress, paraphrase, or drop qualifiers. If the requirements say "Node.js with Express", your output must say "Node.js with Express" — not just "Node.js". If they say "JWT with refresh tokens", keep all of that.
+- For any field the requirements do NOT explicitly specify a technology for (most commonly "storage", but this applies to any field): you MUST NOT invent a specific product or provider and present it as if the user chose it. Instead, write the value starting with "ASSUMED: " followed by a reasonable default and a short reason (for example: "ASSUMED: local filesystem storage - no specific provider was specified"). Never silently fill in a real product name (like a specific cloud storage provider) as if it were a stated requirement.
+
 The estimatedFiles value must be an actual integer in your output (not the literal string "<integer>" shown above), and it must be YOUR OWN realistic estimate for THIS SPECIFIC project's real scope. A small single-feature utility might need as few as 5-8 files; a large multi-role system might genuinely need 25-40. Do not default to any particular number — think about what this specific project actually requires, based on the modules and collections you just listed above.
 
 Do not wrap the JSON in markdown code fences. Do not include any explanation before or after the JSON.`;
