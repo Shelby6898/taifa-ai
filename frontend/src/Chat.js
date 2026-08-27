@@ -586,6 +586,18 @@ function Chat({ currentProject }) {
           <p className="panel-title">
             review all diffs — {pendingDiffs.files.length} file{pendingDiffs.files.length > 1 ? "s" : ""}
           </p>
+          {Array.isArray(pendingDiffs.codeValidationIssues) && pendingDiffs.codeValidationIssues.length > 0 && (
+            <div className="panel-note panel-note-danger">
+              <p>code validator found {pendingDiffs.codeValidationIssues.length} issue(s) in the generated code:</p>
+              <ul className="plan-validation-issues">
+                {pendingDiffs.codeValidationIssues.map((issue, i) => (
+                  <li key={i}>
+                    {issue.path ? <code>{issue.path}</code> : null} {issue.detail}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {pendingDiffs.files.map((f, i) => (
             <div key={i} className="diff-file">
               <div className="diff-file-path">

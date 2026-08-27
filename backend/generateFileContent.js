@@ -1,9 +1,13 @@
 const axios = require("axios");
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
-const MODEL_NAME = "qwen2.5-coder:3b";
+const MODEL_NAME = "qwen2.5-coder-3b-6k";
 
-function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext }) {
+function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext, siblingFiles }) {
+  const siblingSection = siblingFiles && Object.keys(siblingFiles).length > 0
+    ? `Real content of other files already generated in this same batch (you MUST match their actual patterns -- ORM/library usage, naming, data access style, etc. Do NOT invent a different pattern, even if it's a common default from your training data, if a sibling file below already establishes one):\n\n${Object.entries(siblingFiles).map(([path, content]) => `--- ${path} ---\n${content}`).join("\n\n")}\n\n`
+    : "";
+
   const contextSection = projectContext
     ? `Broader project context and requirements, gathered before this file was planned (this may include project-wide technology or architecture constraints — you MUST honor these even if the specific instruction below does not repeat them):\n${projectContext}\n\n`
     : "";
@@ -15,7 +19,7 @@ function buildGenerationPrompt({ mode, targetPath, instruction, existingContent,
   if (mode === "edit" && existingContent) {
     return `You are editing an existing code file at path "${targetPath}".
 
-${contextSection}Current file content:
+${contextSection}${siblingSection}Current file content:
 ${existingContent}
 
 Instruction: ${instruction}${finalReminder}
@@ -48,7 +52,7 @@ Rules:
 
   return `You are creating a new code file at path "${targetPath}".
 
-${contextSection}Instruction: ${instruction}${finalReminder}
+${contextSection}${siblingSection}Instruction: ${instruction}${finalReminder}
 
 Output ONLY the complete file content. Do not include any explanation, introduction, or markdown code fences. Output raw code only, starting from the first line of the file.`;
 }

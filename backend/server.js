@@ -1796,11 +1796,27 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         fileExists = false;
       }
 
+      const stemOf = (p) => p.split("/").pop().replace(/\.[jt]sx?$/i, "").replace(/(Routes|Model|Controller|Service)$/i, "").toLowerCase();
+      const isModelFile = (p) => /\/models\//i.test(p) || /Model\.[jt]sx?$/i.test(p);
+      const targetStem = stemOf(file.path);
+      const targetIsModel = isModelFile(file.path);
+      const siblingFiles = {};
+      for (const ef of enrichedFiles) {
+        const efStem = stemOf(ef.path);
+        const efName = ef.path.split("/").pop();
+        const mentioned = file.description && (file.description.includes(efName) || file.description.toLowerCase().includes(efStem));
+        const bothModels = targetIsModel && isModelFile(ef.path);
+        if (efStem === targetStem || mentioned || bothModels) {
+          siblingFiles[ef.path] = ef.after;
+        }
+      }
+
       const { content: cleanedContent, patchWarnings } = await generateFileContent({
         mode: fileExists ? "edit" : "write",
         targetPath: file.path,
         instruction: file.description,
         projectContext: plan.description,
+      siblingFiles,
         existingContent: fileExists ? existingContent : null
       });
 
@@ -1839,17 +1855,62 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       });
     }
 
+    const { validateGeneratedCode } = require("./codeValidator");
+    const { getWorkspaceDir } = require("./workspaceResolver");
+    let batchBlueprint = null;
+    const blueprintMatch = plan.description.match(/Agreed architecture \(technology choices below are binding, not suggestions\):\s*(\{[\s\S]*\})/);
+    if (blueprintMatch) {
+      try {
+        batchBlueprint = lenientJsonParse(blueprintMatch[1]);
+      } catch (err) {
+        console.error("codeValidator: could not parse blueprint from plan description:", err.message);
+      }
+    }
+
+    // The validator needs visibility into already-applied model files, not
+    // just the current batch -- models are frequently applied in an
+    // earlier, separate batch (e.g. models batch, then a later routes
+    // batch referencing them), and enrichedFiles alone only ever contains
+    // the CURRENT batch's files. Read any already-applied models/*.js
+    // files from disk and merge them in (read-only merge, never written
+    // back -- these are only used as extra context for the validator).
+    let alreadyAppliedModelFiles = [];
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const modelsDir = path.join(workspaceDir, "backend", "models");
+      if (fs.existsSync(modelsDir)) {
+        const modelFilenames = fs.readdirSync(modelsDir).filter((f) => /\.[jt]sx?$/i.test(f));
+        alreadyAppliedModelFiles = modelFilenames
+          .filter((f) => !enrichedFiles.some((ef) => ef.path.endsWith("models/" + f)))
+          .map((f) => ({
+            path: "backend/models/" + f,
+            after: fs.readFileSync(path.join(modelsDir, f), "utf-8")
+          }));
+      }
+    } catch (err) {
+      console.error("codeValidator: could not read already-applied model files:", err.message);
+    }
+
+    console.log("[codeValidator debug] workspaceDir models check -- alreadyAppliedModelFiles.length:", alreadyAppliedModelFiles.length, alreadyAppliedModelFiles.map(f => f.path));
+    console.log("[codeValidator debug] batchBlueprint:", JSON.stringify(batchBlueprint));
+    const codeValidationIssues = validateGeneratedCode([...enrichedFiles, ...alreadyAppliedModelFiles], batchBlueprint)
+      .filter((issue) => enrichedFiles.some((ef) => ef.path === issue.path));
+    console.log("[codeValidator debug] issues found:", codeValidationIssues.length, JSON.stringify(codeValidationIssues));
+
     const enrichResult = enrichWithDiffs(sessionKey, planId, enrichedFiles);
 
     if (!enrichResult.success) {
       return res.status(400).json({ success: false, reason: enrichResult.reason });
     }
 
+    enrichResult.plan.codeValidationIssues = codeValidationIssues;
+
     return res.json({
       success: true,
       action: "diffs_proposed",
       planId,
-      files: enrichedFiles
+      files: enrichedFiles,
+      codeValidationIssues
     });
   } catch (err) {
     console.error("Plan approval failed:", err.message);
@@ -2115,7 +2176,7 @@ app.get("/api/session/current", requireAuth, (req, res) => {
   if (hasPendingPlan(sessionKey)) {
     const plan = getPendingPlan(sessionKey);
     if (plan.stage === "diffs_proposed") {
-      return res.json({ success: true, pending: "diffs", data: { planId: plan.id, files: plan.files } });
+      return res.json({ success: true, pending: "diffs", data: { planId: plan.id, files: plan.files, codeValidationIssues: plan.codeValidationIssues || [] } });
     }
     return res.json({ success: true, pending: "plan", data: { planId: plan.id, description: plan.description, files: plan.files } });
   }
