@@ -44,9 +44,38 @@ function checkOrmMethodMismatch(files, blueprint) {
   const issues = [];
   if (!isSqlArchitecture(blueprint)) return issues;
 
+  const modelNames = new Set();
+  for (const f of files) {
+    if (/models\//i.test(f.path)) {
+      modelNames.add(f.path.split("/").pop().replace(/\.[jt]sx?$/i, ""));
+    }
+  }
+
   for (const file of files) {
     const content = file.after || "";
     let flagged = false;
+
+    // new Model({...}); await instance.save(); is a Mongoose instantiate-
+    // and-save idiom, distinct from the method-call checks above --
+    // Sequelize's idiomatic equivalent is Model.create()/Model.build()
+    // + .save(), not bare `new Model()`. Found via live testing:
+    // contactRequestRoutes.js used `new ContactRequest({...});
+    // await contactRequest.save();` and neither existing check caught it.
+    for (const modelName of modelNames) {
+      const instantiatePattern = new RegExp(`(?:const|let|var)\\s+(\\w+)\\s*=\\s*new\\s+${modelName}\\s*\\(`);
+      const instMatch = content.match(instantiatePattern);
+      if (instMatch) {
+        const varName = instMatch[1];
+        const saveCallPattern = new RegExp(`\\b${varName}\\.save\\s*\\(`);
+        if (saveCallPattern.test(content)) {
+          issues.push({
+            path: file.path,
+            type: "orm_method_mismatch",
+            detail: `Uses "new ${modelName}(...)" + ".save()" -- a Mongoose instantiate-and-save idiom -- but architecture specifies ${blueprint.database} (expected ${modelName}.create(...) or ${modelName}.build(...) + .save()).`
+          });
+        }
+      }
+    }
 
     for (const pattern of MONGOOSE_CALL_PATTERNS) {
       const match = content.match(pattern);
@@ -210,12 +239,105 @@ function checkFieldReferenceMismatch(files) {
   return issues;
 }
 
+// Check 5: unresolved model require path. Flags `require('.../models/X')`
+// where X doesn't match any actual model filename in the batch -- distinct
+// from checkUnimportedModelUsage, which only checks that a model NAME is
+// bound somewhere, never that the require PATH itself resolves. Found via
+// live testing: contactRequestRoutes.js had
+// `require('../models/contact_request')` when the real file is
+// `backend/models/ContactRequest.js` -- would throw "Cannot find module"
+// at runtime. Deliberately only matches requires ending in a specific
+// filename under models/ (e.g. "../models/X"), not barrel imports like
+// `require('../models')`, to avoid false positives on the common
+// `const { User } = require('../models')` pattern.
+function checkUnresolvedModelPath(files) {
+  const issues = [];
+
+  const knownModelFilenames = new Set();
+  for (const file of files) {
+    if (/models\//i.test(file.path)) {
+      knownModelFilenames.add(file.path.split("/").pop().replace(/\.[jt]sx?$/i, ""));
+    }
+  }
+  if (knownModelFilenames.size === 0) return issues;
+
+  const requirePattern = /require\(\s*['"]([^'"]*\/models\/([^'"\/]+))['"]\s*\)/g;
+  for (const file of files) {
+    if (/models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    let match;
+    while ((match = requirePattern.exec(content)) !== null) {
+      const requiredPath = match[1];
+      const requiredBase = match[2].replace(/\.[jt]sx?$/i, "");
+      if (!knownModelFilenames.has(requiredBase)) {
+        issues.push({
+          path: file.path,
+          type: "unresolved_model_path",
+          detail: `Requires "${requiredPath}" but no model file named "${requiredBase}" exists -- known models: ${[...knownModelFilenames].join(", ")}.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+// Check 6: direct factory-model require. Model files in this codebase
+// are commonly written as a FACTORY FUNCTION -- `module.exports = (db) =>
+// { ... return Model; }` -- that only becomes a real, usable Sequelize
+// model once called inside `../models/index.js` (the barrel file) with a
+// real db instance. Requiring a factory-exporting model file DIRECTLY
+// (`require('../models/X')`, not the barrel `require('../models')`) binds
+// either the raw unexecuted function itself, or undefined if destructured
+// (`const { X } = require('../models/X')`) -- both silently broken at
+// runtime, even though the model NAME and require PATH are both perfectly
+// correct (so neither checkUnimportedModelUsage nor
+// checkUnresolvedModelPath catches this). Found via live testing:
+// propertyRoutes.js and agentRoutes.js both did this in the same batch.
+function isFactoryExportModel(modelFileContent) {
+  return /module\.exports\s*=\s*\([^)]*\)\s*=>\s*\{/.test(modelFileContent);
+}
+
+function checkDirectFactoryRequire(files) {
+  const issues = [];
+
+  const factoryModelNames = new Set();
+  for (const file of files) {
+    if (/models\//i.test(file.path)) {
+      const base = file.path.split("/").pop().replace(/\.[jt]sx?$/i, "");
+      if (isFactoryExportModel(file.after || "")) {
+        factoryModelNames.add(base);
+      }
+    }
+  }
+  if (factoryModelNames.size === 0) return issues;
+
+  for (const file of files) {
+    if (/models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    for (const modelName of factoryModelNames) {
+      const directRequirePattern = new RegExp(`require\\(\\s*['"][^'"]*\\/models\\/${modelName}['"]\\s*\\)`);
+      if (directRequirePattern.test(content)) {
+        issues.push({
+          path: file.path,
+          type: "direct_factory_require",
+          detail: `Requires "${modelName}" directly from its model file, but ${modelName}.js exports a factory function that only becomes a real model when called inside the models barrel (../models/index.js) -- use "const { ${modelName} } = require('../models')" instead, or ${modelName} will be undefined or an unusable raw function.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 function validateGeneratedCode(files, blueprint) {
   return [
     ...checkOrmMethodMismatch(files, blueprint),
     ...checkUnimportedModelUsage(files),
     ...checkModelBypass(files),
-    ...checkFieldReferenceMismatch(files)
+    ...checkFieldReferenceMismatch(files),
+    ...checkUnresolvedModelPath(files),
+    ...checkDirectFactoryRequire(files)
   ];
 }
 
@@ -224,5 +346,7 @@ module.exports = {
   checkOrmMethodMismatch,
   checkUnimportedModelUsage,
   checkModelBypass,
-  checkFieldReferenceMismatch
+  checkFieldReferenceMismatch,
+  checkUnresolvedModelPath,
+  checkDirectFactoryRequire
 };
