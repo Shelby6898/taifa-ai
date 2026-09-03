@@ -330,6 +330,54 @@ function checkDirectFactoryRequire(files) {
   return issues;
 }
 
+// Check 7: barrel require without destructuring. `const ModelName =
+// require('../models')` (no curly braces) binds the ENTIRE models
+// barrel object (which exports { User, Property, Favorite, ... } all
+// together) to the variable ModelName -- not the model itself. Found
+// live: favoriteRoutes.js did `const Favorite = require('../models');`
+// then called `Favorite.create(...)`, which would fail since the
+// barrel object itself has no .create method. This passed the
+// existing isModelImported "direct assignment" check, since that
+// check only verifies SOME require binds the name -- it doesn't
+// distinguish a barrel-path require (wrong without destructuring)
+// from a specific-model-file require (right, that's what direct
+// assignment is actually for). Deliberately only matches a require
+// path that resolves to exactly the barrel ('../models', './models',
+// 'models', with no further /Something after it) -- a direct require
+// of a specific model FILE is a different, already-covered case
+// (checkDirectFactoryRequire).
+function checkBarrelWithoutDestructuring(files) {
+  const issues = [];
+
+  const modelNames = new Set();
+  for (const file of files) {
+    if (/models\//i.test(file.path)) {
+      modelNames.add(file.path.split("/").pop().replace(/\.[jt]sx?$/i, ""));
+    }
+  }
+  if (modelNames.size === 0) return issues;
+
+  const directBarrelPattern = /(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*['"]((?:\.\.?\/)*models)['"]\s*\)/g;
+
+  for (const file of files) {
+    if (/models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    let match;
+    while ((match = directBarrelPattern.exec(content)) !== null) {
+      const varName = match[1];
+      if (modelNames.has(varName)) {
+        issues.push({
+          path: file.path,
+          type: "barrel_without_destructuring",
+          detail: `Requires the models barrel directly as "${varName}" (\`const ${varName} = require('${match[2]}')\`) instead of destructuring -- this binds the WHOLE barrel object, not the ${varName} model. Use "const { ${varName} } = require('${match[2]}')" instead.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 function validateGeneratedCode(files, blueprint) {
   return [
     ...checkOrmMethodMismatch(files, blueprint),
@@ -337,7 +385,8 @@ function validateGeneratedCode(files, blueprint) {
     ...checkModelBypass(files),
     ...checkFieldReferenceMismatch(files),
     ...checkUnresolvedModelPath(files),
-    ...checkDirectFactoryRequire(files)
+    ...checkDirectFactoryRequire(files),
+    ...checkBarrelWithoutDestructuring(files)
   ];
 }
 
@@ -348,5 +397,6 @@ module.exports = {
   checkModelBypass,
   checkFieldReferenceMismatch,
   checkUnresolvedModelPath,
-  checkDirectFactoryRequire
+  checkDirectFactoryRequire,
+  checkBarrelWithoutDestructuring
 };
