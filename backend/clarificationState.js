@@ -1,6 +1,77 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const { sanitizeKeyPart } = require("./sanitize");
 
 const sessions = new Map(); // sessionKey -> clarification object
+
+// --- Disk persistence ---
+//
+// Clarification sessions (requirements Q&A, architecture-relevant-files
+// confirmation, blueprint confirmation) previously lived only in memory,
+// so a server restart silently wiped an in-flight session -- unlike
+// planState.js, which already persists plans/campaigns. That gap meant
+// free-text "approve"/"looks good" after a restart had nothing pending
+// to guard against, and fell through to open-ended chat, which
+// hallucinated a fake confirmation instead of erroring. Mirrors
+// planState.js's persistence pattern exactly.
+
+const CLARIFICATION_STATE_DIR = path.join(__dirname, "memory", "clarificationState");
+
+function ensureClarificationStateDir() {
+  if (!fs.existsSync(CLARIFICATION_STATE_DIR)) {
+    fs.mkdirSync(CLARIFICATION_STATE_DIR, { recursive: true });
+  }
+}
+
+function fileKeyFor(sessionKey) {
+  const [studentId, projectName] = sessionKey.split(":");
+  return `${sanitizeKeyPart(studentId)}__${sanitizeKeyPart(projectName)}`;
+}
+
+function sessionFilePath(sessionKey) {
+  return path.join(CLARIFICATION_STATE_DIR, `session-${fileKeyFor(sessionKey)}.json`);
+}
+
+function persistSession(sessionKey) {
+  const c = sessions.get(sessionKey);
+  if (!c) return;
+  ensureClarificationStateDir();
+  fs.writeFileSync(
+    sessionFilePath(sessionKey),
+    JSON.stringify({ sessionKey, clarification: c }, null, 2)
+  );
+}
+
+function removePersistedSession(sessionKey) {
+  const fp = sessionFilePath(sessionKey);
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp);
+  }
+}
+
+function loadPersistedState() {
+  if (!fs.existsSync(CLARIFICATION_STATE_DIR)) {
+    return;
+  }
+
+  for (const file of fs.readdirSync(CLARIFICATION_STATE_DIR)) {
+    const filePath = path.join(CLARIFICATION_STATE_DIR, file);
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      if (file.startsWith("session-") && parsed.sessionKey && parsed.clarification) {
+        sessions.set(parsed.sessionKey, parsed.clarification);
+      }
+    } catch (err) {
+      console.error(`[clarificationState] Failed to load ${file}:`, err.message);
+    }
+  }
+
+  if (sessions.size > 0) {
+    console.log(`[clarificationState] Restored ${sessions.size} pending clarification session(s) from disk`);
+  }
+}
 
 function hasPendingClarification(sessionKey) {
   return sessions.has(sessionKey);
@@ -44,6 +115,7 @@ function startClarification(sessionKey, { description, questions, memoryContext 
   };
 
   sessions.set(sessionKey, clarification);
+  persistSession(sessionKey);
   return clarification;
 }
 
@@ -56,6 +128,7 @@ function recordAnswer(sessionKey, { answer, skipped }) {
   const q = c.questions[c.currentIndex];
   c.answers.push({ tag: q.tag, question: q.text, answer, skipped });
   c.currentIndex += 1;
+  persistSession(sessionKey);
 
   return { success: true, clarification: c };
 }
@@ -123,12 +196,14 @@ function setPhase(sessionKey, phase) {
   const c = sessions.get(sessionKey);
   if (!c) return;
   c.phase = phase;
+  persistSession(sessionKey);
 }
 
 function setEnrichedDescription(sessionKey, desc) {
   const c = sessions.get(sessionKey);
   if (!c) return;
   c.enrichedDescription = desc;
+  persistSession(sessionKey);
 }
 
 function getEnrichedDescription(sessionKey) {
@@ -144,6 +219,7 @@ function beginArchitectureConfirmation(sessionKey, { relevantFiles }) {
   }
   c.phase = "architecture";
   c.relevantFiles = relevantFiles;
+  persistSession(sessionKey);
   return { success: true };
 }
 
@@ -160,6 +236,7 @@ function beginBlueprintConfirmation(sessionKey, { blueprint }) {
   }
   c.phase = "blueprint";
   c.blueprint = blueprint;
+  persistSession(sessionKey);
   return { success: true };
 }
 
@@ -171,6 +248,7 @@ function getBlueprint(sessionKey) {
 
 function clearClarification(sessionKey) {
   sessions.delete(sessionKey);
+  removePersistedSession(sessionKey);
 }
 
 module.exports = {
@@ -191,3 +269,5 @@ module.exports = {
   getBlueprint,
   clearClarification
 };
+
+loadPersistedState();
