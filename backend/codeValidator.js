@@ -15,6 +15,8 @@ const MONGOOSE_CALL_PATTERNS = [
   /\.findById\s*\(/,
   /\.findByIdAndUpdate\s*\(/,
   /\.findByIdAndDelete\s*\(/,
+  /\.findOneAndUpdate\s*\(/,
+  /\.findOneAndDelete\s*\(/,
   /mongoose\.Schema/,
   /mongoose\.model\s*\(/
 ];
