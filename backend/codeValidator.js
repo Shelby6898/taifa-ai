@@ -380,6 +380,123 @@ function checkBarrelWithoutDestructuring(files) {
   return issues;
 }
 
+// Check 8: undefined Sequelize association target. `ModelA.belongsToMany
+// (ModelB, ...)` / `.hasMany(ModelB)` / `.hasOne(ModelB)` / `.belongsTo
+// (ModelB)` reference a second model at MODULE LOAD TIME (not inside a
+// function), so if ModelB is never imported/defined in that file, the
+// require() itself throws immediately -- not just a specific route
+// handler. Distinct from checkUnimportedModelUsage: that check skips
+// files under models/ entirely (models aren't checked against
+// themselves), but association bugs commonly happen INSIDE a model
+// file referencing another model it never imported. Found live:
+// User.js called User.belongsToMany(Produce, ...), User.hasMany(Buyer),
+// Buyer.belongsTo(User) with neither Produce nor Buyer ever required.
+const ASSOCIATION_METHODS = ["belongsToMany", "hasMany", "hasOne", "belongsTo"];
+
+function isModelDefinedLocally(content, modelName) {
+  const viaConst = new RegExp(`(?:const|let|var)\\s+${modelName}\\s*=\\s*sequelize\\.define\\s*\\(`);
+  const viaLiteral = new RegExp(`sequelize\\.define\\s*\\(\\s*['"]${modelName}['"]`);
+  return viaConst.test(content) || viaLiteral.test(content);
+}
+
+function checkUndefinedAssociationTarget(files) {
+  const issues = [];
+
+  // No modelNames pre-filter: the original bug (User.js referencing
+  // Produce/Buyer) involved model names that had NO file in the batch
+  // at all, which a "does a file exist for this name" gate would always
+  // skip. Instead, treat any capitalized identifier passed as the first
+  // arg to an association method as a model reference, and flag it
+  // unless it's actually imported or defined locally in this file.
+  const assocPattern = new RegExp(`(\\w+)\\.(?:${ASSOCIATION_METHODS.join("|")})\\s*\\(\\s*(\\w+)`, "g");
+
+  for (const file of files) {
+    const content = file.after || "";
+    let match;
+    while ((match = assocPattern.exec(content)) !== null) {
+      const subjectModel = match[1];
+      const targetModel = match[2];
+
+      // Check the subject (Model.belongsTo(...)) and the argument
+      // (...belongsTo(Model)) independently -- either one can be the
+      // undefined variable. Real bug: `Buyer.belongsTo(User)` where
+      // User was fine but Buyer itself was never defined.
+      for (const candidate of [subjectModel, targetModel]) {
+        if (!/^[A-Z]/.test(candidate)) continue; // skip option objects / lowercase args
+        if (isModelImported(content, candidate) || isModelDefinedLocally(content, candidate)) continue;
+
+        issues.push({
+          path: file.path,
+          type: "undefined_association_target",
+          detail: `Calls an association (\`${match[0]}...\`) involving "${candidate}", but "${candidate}" is never imported or defined in this file -- will throw at module load time, not just when a route is hit.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+// Check 9 (best-effort): frontend/backend response-field mismatch. A
+// frontend file reads response.data.FIELD, but no backend route file in
+// this batch ever sends a "FIELD" key in any res.json({...}) call --
+// that field will always be undefined. Deliberately combines ALL sent
+// keys across ALL route files in the batch (rather than trying to
+// correlate a specific axios URL to a specific route's exact response
+// shape, which would be fragile with regex alone) -- this trades some
+// precision for a much lower false-positive rate, since it only flags a
+// field that's NEVER sent anywhere, not one sent by a different route
+// than the one called. Found live: SignupForm.js checked
+// response.data.success, but no route anywhere sent a "success" key.
+function extractResJsonKeys(routeContent) {
+  const keys = new Set();
+  const jsonCallPattern = /res(?:\.status\s*\(\s*\d+\s*\))?\.json\s*\(\s*\{([^}]*)\}/g;
+  let m;
+  while ((m = jsonCallPattern.exec(routeContent)) !== null) {
+    const keyPattern = /(\w+)\s*:/g;
+    let km;
+    while ((km = keyPattern.exec(m[1])) !== null) {
+      keys.add(km[1]);
+    }
+  }
+  return keys;
+}
+
+function checkFrontendBackendResponseMismatch(files) {
+  const issues = [];
+
+  const routeFiles = files.filter((f) => /routes?\//i.test(f.path));
+  if (routeFiles.length === 0) return issues;
+
+  const allSentKeys = new Set();
+  for (const rf of routeFiles) {
+    for (const k of extractResJsonKeys(rf.after || "")) allSentKeys.add(k);
+  }
+  if (allSentKeys.size === 0) return issues;
+
+  for (const file of files) {
+    if (!/\.[jt]sx?$/i.test(file.path)) continue;
+    if (/routes?\//i.test(file.path) || /models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    const accessPattern = /(?:response|res)\.data\.(\w+)/g;
+    let match;
+    const checked = new Set();
+    while ((match = accessPattern.exec(content)) !== null) {
+      const field = match[1];
+      if (checked.has(field)) continue;
+      checked.add(field);
+      if (!allSentKeys.has(field)) {
+        issues.push({
+          path: file.path,
+          type: "response_field_mismatch",
+          detail: `Reads "response.data.${field}" but no backend route in this batch's res.json(...) calls ever sends a "${field}" key -- this field will always be undefined.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 function validateGeneratedCode(files, blueprint) {
   return [
     ...checkOrmMethodMismatch(files, blueprint),
@@ -388,7 +505,9 @@ function validateGeneratedCode(files, blueprint) {
     ...checkFieldReferenceMismatch(files),
     ...checkUnresolvedModelPath(files),
     ...checkDirectFactoryRequire(files),
-    ...checkBarrelWithoutDestructuring(files)
+    ...checkBarrelWithoutDestructuring(files),
+    ...checkUndefinedAssociationTarget(files),
+    ...checkFrontendBackendResponseMismatch(files)
   ];
 }
 
@@ -400,5 +519,7 @@ module.exports = {
   checkFieldReferenceMismatch,
   checkUnresolvedModelPath,
   checkDirectFactoryRequire,
-  checkBarrelWithoutDestructuring
+  checkBarrelWithoutDestructuring,
+  checkUndefinedAssociationTarget,
+  checkFrontendBackendResponseMismatch
 };
