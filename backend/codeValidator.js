@@ -452,10 +452,24 @@ function extractResJsonKeys(routeContent) {
   const jsonCallPattern = /res(?:\.status\s*\(\s*\d+\s*\))?\.json\s*\(\s*\{([^}]*)\}/g;
   let m;
   while ((m = jsonCallPattern.exec(routeContent)) !== null) {
-    const keyPattern = /(\w+)\s*:/g;
-    let km;
-    while ((km = keyPattern.exec(m[1])) !== null) {
-      keys.add(km[1]);
+    // Split top-level properties on commas (good enough for the flat,
+    // single-level object literals res.json({...}) is normally called
+    // with -- nested braces/values aren't expected here). For each
+    // property, prefer the part before ":" if present (explicit
+    // key: value); otherwise the whole trimmed segment IS the key,
+    // since it's an ES6 shorthand property like `token` in
+    // `res.json({ message: '...', token, user })`. The original regex
+    // only matched the ":"-form and silently dropped every shorthand
+    // key, which meant legitimately-sent fields were reported as
+    // never sent.
+    const props = m[1].split(",");
+    for (const prop of props) {
+      const trimmed = prop.trim();
+      if (!trimmed) continue;
+      const colonIdx = trimmed.indexOf(":");
+      const key = colonIdx === -1 ? trimmed : trimmed.slice(0, colonIdx).trim();
+      const keyMatch = key.match(/^[\w$]+$/);
+      if (keyMatch) keys.add(keyMatch[0]);
     }
   }
   return keys;
@@ -478,19 +492,34 @@ function checkFrontendBackendResponseMismatch(files) {
     if (/routes?\//i.test(file.path) || /models\//i.test(file.path)) continue;
     const content = file.after || "";
 
-    const accessPattern = /(?:response|res)\.data\.(\w+)/g;
-    let match;
+    // Don't assume the axios result is named "response" or "res" --
+    // the real bug used `const hashedPassword = await axios.post(...)`.
+    // First collect every variable that an awaited axios call was
+    // assigned to, then check THAT name's .data.field accesses.
+    const assignPattern = /(?:const|let|var)\s+(\w+)\s*=\s*await\s+axios\s*\.\s*\w+\s*\(/g;
+    const axiosVarNames = new Set();
+    let am;
+    while ((am = assignPattern.exec(content)) !== null) {
+      axiosVarNames.add(am[1]);
+    }
+    if (axiosVarNames.size === 0) continue;
+
     const checked = new Set();
-    while ((match = accessPattern.exec(content)) !== null) {
-      const field = match[1];
-      if (checked.has(field)) continue;
-      checked.add(field);
-      if (!allSentKeys.has(field)) {
-        issues.push({
-          path: file.path,
-          type: "response_field_mismatch",
-          detail: `Reads "response.data.${field}" but no backend route in this batch's res.json(...) calls ever sends a "${field}" key -- this field will always be undefined.`
-        });
+    for (const varName of axiosVarNames) {
+      const accessPattern = new RegExp(`\\b${varName}\\.data\\.(\\w+)`, "g");
+      let match;
+      while ((match = accessPattern.exec(content)) !== null) {
+        const field = match[1];
+        const dedupeKey = `${varName}.${field}`;
+        if (checked.has(dedupeKey)) continue;
+        checked.add(dedupeKey);
+        if (!allSentKeys.has(field)) {
+          issues.push({
+            path: file.path,
+            type: "response_field_mismatch",
+            detail: `Reads "${varName}.data.${field}" but no backend route in this batch's res.json(...) calls ever sends a "${field}" key -- this field will always be undefined.`
+          });
+        }
       }
     }
   }
