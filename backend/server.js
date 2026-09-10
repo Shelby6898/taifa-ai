@@ -307,6 +307,67 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
       }
     }
 
+    // The multi-file plan/approve path already runs validateGeneratedCode
+    // (ORM-mismatch, undefined-association, response-field-mismatch checks),
+    // but single-file write/edit commands never did -- meaning every
+    // Mongoose-vs-Sequelize, undefined-association, or response-shape bug
+    // caught by those checks was invisible on this path. Infer the SQL/ORM
+    // architecture from package.json (ground truth for what's actually
+    // installed) rather than a stored memory fact, since a project may
+    // never have gone through plan:/execute plan: and so never had one
+    // written at all.
+    const { validateGeneratedCode } = require("./codeValidator");
+    const { getWorkspaceDir } = require("./workspaceResolver");
+    let batchBlueprint = null;
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const pkgPath = path.join(workspaceDir, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        if (deps.sequelize) batchBlueprint = { database: "PostgreSQL" };
+      }
+    } catch (err) {
+      console.error("codeValidator: could not infer architecture from package.json:", err.message);
+    }
+
+    let alreadyAppliedModelFiles = [];
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const modelsDir = path.join(workspaceDir, "backend", "models");
+      if (fs.existsSync(modelsDir)) {
+        const modelFilenames = fs.readdirSync(modelsDir).filter((f) => /\.[jt]sx?$/i.test(f));
+        alreadyAppliedModelFiles = modelFilenames
+          .filter((f) => !safetyCheck.resolvedPath.endsWith("models/" + f))
+          .map((f) => ({
+            path: "backend/models/" + f,
+            after: fs.readFileSync(path.join(modelsDir, f), "utf-8")
+          }));
+      }
+    } catch (err) {
+      console.error("codeValidator: could not read already-applied model files:", err.message);
+    }
+
+    if (batchBlueprint) {
+      const currentFile = { path: targetPath, after: cleanedContent };
+      const codeValidationIssues = validateGeneratedCode(
+        [currentFile, ...alreadyAppliedModelFiles],
+        batchBlueprint
+      ).filter((issue) => issue.path === targetPath);
+
+      if (codeValidationIssues.length > 0) {
+        return res.json({
+          success: true,
+          action: "generation_refused",
+          reason: "The code validator found issue(s) that indicate this change will not work correctly.",
+          codeValidationIssues,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult,
+          testCheck
+        });
+      }
+    }
+
     createPendingWrite(sessionKey, {
       mode,
       targetPath,
