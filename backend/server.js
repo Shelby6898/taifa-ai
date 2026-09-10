@@ -232,11 +232,67 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
     fileExists = false;
   }
 
+  // Build sibling-file and project-context grounding, the same mechanism
+  // the multi-file plan/approve path already uses (see enrichedFiles-based
+  // siblingFiles construction there) -- but sourced from files already on
+  // disk, since a single write:/edit: call has no "rest of the batch" to
+  // draw from. Missing this was the root cause of repeated Mongoose-style
+  // drift and generic-CRUD-template fallbacks on this path: the prompt
+  // template already supports both fields and even has an explicit
+  // anti-Mongoose-drift warning gated on projectContext being present, but
+  // this path never populated either, so none of it ever activated.
+  const { getWorkspaceDir: getWorkspaceDirForContext } = require("./workspaceResolver");
+  let siblingFiles = {};
+  let projectContext = null;
+  try {
+    const workspaceDir = getWorkspaceDirForContext(sessionKey);
+
+    const pkgPath = path.join(workspaceDir, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
+      if (deps.length > 0) {
+        const ormNote = deps.includes("sequelize")
+          ? " This project uses Sequelize with PostgreSQL -- NOT Mongoose/MongoDB."
+          : deps.includes("mongoose")
+          ? " This project uses Mongoose with MongoDB."
+          : "";
+        projectContext = `This project's package.json declares these dependencies: ${deps.join(", ")}.${ormNote}`;
+      }
+    }
+
+    const stemOf = (p) => p.split("/").pop().replace(/\.[jt]sx?$/i, "").replace(/(Routes|Model|Controller|Service)$/i, "").toLowerCase();
+    const isModelFile = (p) => /\/models\//i.test(p) || /Model\.[jt]sx?$/i.test(p);
+    const targetStem = stemOf(targetPath);
+    const targetIsModel = isModelFile(targetPath);
+
+    const candidateDirs = ["backend/models", "backend/routes"];
+    for (const dir of candidateDirs) {
+      const fullDir = path.join(workspaceDir, dir);
+      if (!fs.existsSync(fullDir)) continue;
+      const filenames = fs.readdirSync(fullDir).filter((f) => /\.[jt]sx?$/i.test(f));
+      for (const f of filenames) {
+        const relPath = dir + "/" + f;
+        if (relPath === targetPath) continue;
+        const efStem = stemOf(relPath);
+        const mentioned = instruction && (instruction.includes(f) || instruction.toLowerCase().includes(efStem));
+        const bothModels = targetIsModel && isModelFile(relPath);
+        if (efStem === targetStem || mentioned || bothModels) {
+          siblingFiles[relPath] = fs.readFileSync(path.join(fullDir, f), "utf-8");
+        }
+      }
+    }
+  } catch (err) {
+    console.error("generateFileContent context: could not build sibling/project context:", err.message);
+  }
+
   try {
     const { content: cleanedContent, patchWarnings } = await generateFileContent({
       mode,
       targetPath,
       instruction,
+      projectContext,
+      siblingFiles,
       existingContent: fileExists ? existingContent : null
     });
 

@@ -5,7 +5,7 @@ const MODEL_NAME = "qwen2.5-coder-3b-6k";
 
 function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext, siblingFiles }) {
   const siblingSection = siblingFiles && Object.keys(siblingFiles).length > 0
-    ? `Real content of other files already generated in this same batch (you MUST match their actual patterns -- ORM/library usage, naming, data access style, etc. Do NOT invent a different pattern, even if it's a common default from your training data, if a sibling file below already establishes one):\n\n${Object.entries(siblingFiles).map(([path, content]) => `--- ${path} ---\n${content}`).join("\n\n")}\n\n`
+    ? `Real content of other RELATED files in this project, shown for reference ONLY (you MUST match their actual patterns -- ORM/library usage, naming, data access style, etc. Do NOT invent a different pattern, even if it's a common default from your training data, if a sibling file below already establishes one). These files are NOT the file you are writing -- do NOT copy, reproduce, or output any of their content directly. Your output must be the content of "${targetPath}" specifically, which is a different file serving a different purpose than the reference file(s) below:\n\n${Object.entries(siblingFiles).map(([path, content]) => `--- ${path} (REFERENCE ONLY -- do not reproduce this) ---\n${content}`).join("\n\n")}\n\n`
     : "";
 
   const contextSection = projectContext
