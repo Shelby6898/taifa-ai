@@ -286,6 +286,32 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
     console.error("generateFileContent context: could not build sibling/project context:", err.message);
   }
 
+  // No-op edit detection: if this is an edit: on an existing file, and the
+  // instruction's literal text already contains what amounts to the
+  // existing file's content (whitespace-normalized), the human is asking
+  // for a "change" that changes nothing. Confirmed live that this specific
+  // instruction shape ("replace the entire file with exactly this
+  // content...<content identical to what's on disk>") consistently
+  // produced degenerate model output (raw output of just ">>>>>>>
+  // REPLACE" with no actual SEARCH/REPLACE blocks) across all retry
+  // attempts -- not random non-determinism, a genuine confusion the local
+  // model has with being asked to "change" something into itself. Skip
+  // generation entirely in this case rather than burning 3 retry attempts
+  // on a call that reliably fails.
+  if (mode === "edit" && fileExists && instruction) {
+    const normalize = (s) => s.replace(/\s+/g, " ").trim();
+    const normalizedExisting = normalize(existingContent);
+    const normalizedInstruction = normalize(instruction);
+    if (normalizedExisting.length > 20 && normalizedInstruction.includes(normalizedExisting)) {
+      return res.json({
+        success: true,
+        action: "generation_skipped",
+        reason: "The instruction's target content is already identical to the current file — no change needed.",
+        targetPath
+      });
+    }
+  }
+
   // Retry loop: local-model generation has shown real run-to-run
   // non-determinism -- the SAME prompt/context can pass or fail validation
   // on different calls (confirmed live: an identical "replace with exactly

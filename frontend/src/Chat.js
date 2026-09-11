@@ -145,6 +145,8 @@ function Chat({ currentProject }) {
       return detailLines.join("\n");
     } else if (data.action === "action_rejected") {
       return `Action rejected: ${data.reason}`;
+    } else if (data.action === "generation_skipped") {
+      return `ℹ️ ${data.reason}`;
     }
     return `Error: ${data.reason || data.error || "Unknown error"}`;
   };
