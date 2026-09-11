@@ -286,180 +286,227 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
     console.error("generateFileContent context: could not build sibling/project context:", err.message);
   }
 
-  try {
-    const { content: cleanedContent, patchWarnings } = await generateFileContent({
-      mode,
-      targetPath,
-      instruction,
-      projectContext,
-      siblingFiles,
-      existingContent: fileExists ? existingContent : null
-    });
+  // Retry loop: local-model generation has shown real run-to-run
+  // non-determinism -- the SAME prompt/context can pass or fail validation
+  // on different calls (confirmed live: an identical "replace with exactly
+  // this" instruction was refused three times in a row, then succeeded
+  // cleanly on a fourth attempt with byte-identical input). Rather than
+  // surfacing a refusal to the user on the very first failed attempt,
+  // retry automatically up to MAX_GENERATION_ATTEMPTS times before giving
+  // up -- only the LAST attempt's refusal (if all attempts fail) is ever
+  // shown to the user.
+  const MAX_GENERATION_ATTEMPTS = 3;
+  let lastRefusal = null;
 
-    const { checkSyntax } = require("./syntaxChecker");
-    const syntaxResult = checkSyntax(cleanedContent);
-    const { checkImports } = require("./importChecker");
-    const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath);
-    const { checkLint } = require("./lintChecker");
-    const lintResult = checkLint(cleanedContent);
-    const { runTestsAgainstProposal } = require("./testRunner");
-    const testCheck = runTestsAgainstProposal(safetyCheck.resolvedPath, cleanedContent);
+  for (let attemptNum = 1; attemptNum <= MAX_GENERATION_ATTEMPTS; attemptNum++) {
+    const isLastAttempt = attemptNum === MAX_GENERATION_ATTEMPTS;
 
-    if (testCheck.hasTests && !testCheck.passed) {
+    try {
+      const { content: cleanedContent, patchWarnings } = await generateFileContent({
+        mode,
+        targetPath,
+        instruction,
+        projectContext,
+        siblingFiles,
+        existingContent: fileExists ? existingContent : null
+      });
+
+      const { checkSyntax } = require("./syntaxChecker");
+      const syntaxResult = checkSyntax(cleanedContent);
+      const { checkImports } = require("./importChecker");
+      const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath);
+      const { checkLint } = require("./lintChecker");
+      const lintResult = checkLint(cleanedContent);
+      const { runTestsAgainstProposal } = require("./testRunner");
+      const testCheck = runTestsAgainstProposal(safetyCheck.resolvedPath, cleanedContent);
+
+      if (testCheck.hasTests && !testCheck.passed) {
+        lastRefusal = {
+          success: true,
+          action: "generation_refused",
+          reason: "The existing test suite fails against this proposed change.",
+          testCheck,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult
+        };
+        if (isLastAttempt) return res.json(lastRefusal);
+        console.log(`[handleWriteCommand] attempt ${attemptNum} refused (test suite), retrying...`);
+        continue;
+      }
+
+      const { detectRouteRegressions } = require("./regressionChecker");
+      const regressionWarnings = detectRouteRegressions(fileExists ? existingContent : null, cleanedContent);
+
+      if (regressionWarnings.length > 0) {
+        lastRefusal = {
+          success: true,
+          action: "generation_refused",
+          reason: "This change appears to silently remove or weaken an existing route.",
+          regressionWarnings,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult,
+          testCheck
+        };
+        if (isLastAttempt) return res.json(lastRefusal);
+        console.log(`[handleWriteCommand] attempt ${attemptNum} refused (regression), retrying...`);
+        continue;
+      }
+
+      const { checkUndeclaredDependencies, checkPackageVersionsExist } = require("./packageJsonChecker");
+      const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
+
+      if (undeclaredDependencies.length > 0) {
+        lastRefusal = {
+          success: true,
+          action: "generation_refused",
+          reason: "This change requires a package that isn't declared in package.json: " + undeclaredDependencies.join(", "),
+          undeclaredDependencies,
+          syntaxCheck: syntaxResult,
+          importCheck: importResult,
+          testCheck
+        };
+        if (isLastAttempt) return res.json(lastRefusal);
+        console.log(`[handleWriteCommand] attempt ${attemptNum} refused (undeclared deps), retrying...`);
+        continue;
+      }
+
+      let packageVersionCheck = null;
+      if (safetyCheck.resolvedPath.endsWith("package.json")) {
+        packageVersionCheck = await checkPackageVersionsExist(cleanedContent);
+        if (packageVersionCheck.invalidVersions && packageVersionCheck.invalidVersions.length > 0) {
+          lastRefusal = {
+            success: true,
+            action: "generation_refused",
+            reason: "This package.json specifies a version that doesn't exist on the npm registry: " +
+              packageVersionCheck.invalidVersions.map(v => `${v.name}@${v.exactVersion}`).join(", "),
+            packageVersionCheck,
+            syntaxCheck: syntaxResult,
+            importCheck: importResult,
+            testCheck
+          };
+          if (isLastAttempt) return res.json(lastRefusal);
+          console.log(`[handleWriteCommand] attempt ${attemptNum} refused (package version), retrying...`);
+          continue;
+        }
+      }
+
+      // The multi-file plan/approve path already runs validateGeneratedCode
+      // (ORM-mismatch, undefined-association, response-field-mismatch checks),
+      // but single-file write/edit commands never did -- meaning every
+      // Mongoose-vs-Sequelize, undefined-association, or response-shape bug
+      // caught by those checks was invisible on this path. Infer the SQL/ORM
+      // architecture from package.json (ground truth for what's actually
+      // installed) rather than a stored memory fact, since a project may
+      // never have gone through plan:/execute plan: and so never had one
+      // written at all.
+      const { validateGeneratedCode } = require("./codeValidator");
+      const { getWorkspaceDir } = require("./workspaceResolver");
+      let batchBlueprint = null;
+      try {
+        const workspaceDir = getWorkspaceDir(sessionKey);
+        const pkgPath = path.join(workspaceDir, "package.json");
+        if (fs.existsSync(pkgPath)) {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+          const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+          if (deps.sequelize) batchBlueprint = { database: "PostgreSQL" };
+        }
+      } catch (err) {
+        console.error("codeValidator: could not infer architecture from package.json:", err.message);
+      }
+
+      let alreadyAppliedModelFiles = [];
+      try {
+        const workspaceDir = getWorkspaceDir(sessionKey);
+        const modelsDir = path.join(workspaceDir, "backend", "models");
+        if (fs.existsSync(modelsDir)) {
+          const modelFilenames = fs.readdirSync(modelsDir).filter((f) => /\.[jt]sx?$/i.test(f));
+          alreadyAppliedModelFiles = modelFilenames
+            .filter((f) => !safetyCheck.resolvedPath.endsWith("models/" + f))
+            .map((f) => ({
+              path: "backend/models/" + f,
+              after: fs.readFileSync(path.join(modelsDir, f), "utf-8")
+            }));
+        }
+      } catch (err) {
+        console.error("codeValidator: could not read already-applied model files:", err.message);
+      }
+
+      if (batchBlueprint) {
+        const currentFile = { path: targetPath, after: cleanedContent };
+        const codeValidationIssues = validateGeneratedCode(
+          [currentFile, ...alreadyAppliedModelFiles],
+          batchBlueprint
+        ).filter((issue) => issue.path === targetPath);
+
+        if (codeValidationIssues.length > 0) {
+          lastRefusal = {
+            success: true,
+            action: "generation_refused",
+            reason: "The code validator found issue(s) that indicate this change will not work correctly.",
+            codeValidationIssues,
+            syntaxCheck: syntaxResult,
+            importCheck: importResult,
+            testCheck
+          };
+          if (isLastAttempt) return res.json(lastRefusal);
+          console.log(`[handleWriteCommand] attempt ${attemptNum} refused (code validator: ${codeValidationIssues.map(i => i.type).join(", ")}), retrying...`);
+          continue;
+        }
+      }
+
+      createPendingWrite(sessionKey, {
+        mode,
+        targetPath,
+        resolvedPath: safetyCheck.resolvedPath,
+        fileExists,
+        before: fileExists ? existingContent : "",
+        after: cleanedContent,
+        patchWarnings,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        lintCheck: lintResult,
+        testCheck
+      });
+
       return res.json({
         success: true,
-        action: "generation_refused",
-        reason: "The existing test suite fails against this proposed change.",
+        action: "propose_write",
+        mode,
+        targetPath,
+        resolvedPath: safetyCheck.resolvedPath,
+        fileExists,
+        before: fileExists ? existingContent : "",
+        after: cleanedContent,
+        patchWarnings,
+        syntaxCheck: syntaxResult,
+        importCheck: importResult,
+        lintCheck: lintResult,
         testCheck,
-        syntaxCheck: syntaxResult,
-        importCheck: importResult
       });
-    }
-
-    const { detectRouteRegressions } = require("./regressionChecker");
-    const regressionWarnings = detectRouteRegressions(fileExists ? existingContent : null, cleanedContent);
-
-    if (regressionWarnings.length > 0) {
-      return res.json({
-        success: true,
-        action: "generation_refused",
-        reason: "This change appears to silently remove or weaken an existing route.",
-        regressionWarnings,
-        syntaxCheck: syntaxResult,
-        importCheck: importResult,
-        testCheck
-      });
-    }
-
-    const { checkUndeclaredDependencies, checkPackageVersionsExist } = require("./packageJsonChecker");
-    const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
-
-    if (undeclaredDependencies.length > 0) {
-      return res.json({
-        success: true,
-        action: "generation_refused",
-        reason: "This change requires a package that isn't declared in package.json: " + undeclaredDependencies.join(", "),
-        undeclaredDependencies,
-        syntaxCheck: syntaxResult,
-        importCheck: importResult,
-        testCheck
-      });
-    }
-
-    let packageVersionCheck = null;
-    if (safetyCheck.resolvedPath.endsWith("package.json")) {
-      packageVersionCheck = await checkPackageVersionsExist(cleanedContent);
-      if (packageVersionCheck.invalidVersions && packageVersionCheck.invalidVersions.length > 0) {
-        return res.json({
-          success: true,
-          action: "generation_refused",
-          reason: "This package.json specifies a version that doesn't exist on the npm registry: " +
-            packageVersionCheck.invalidVersions.map(v => `${v.name}@${v.exactVersion}`).join(", "),
-          packageVersionCheck,
-          syntaxCheck: syntaxResult,
-          importCheck: importResult,
-          testCheck
-        });
-      }
-    }
-
-    // The multi-file plan/approve path already runs validateGeneratedCode
-    // (ORM-mismatch, undefined-association, response-field-mismatch checks),
-    // but single-file write/edit commands never did -- meaning every
-    // Mongoose-vs-Sequelize, undefined-association, or response-shape bug
-    // caught by those checks was invisible on this path. Infer the SQL/ORM
-    // architecture from package.json (ground truth for what's actually
-    // installed) rather than a stored memory fact, since a project may
-    // never have gone through plan:/execute plan: and so never had one
-    // written at all.
-    const { validateGeneratedCode } = require("./codeValidator");
-    const { getWorkspaceDir } = require("./workspaceResolver");
-    let batchBlueprint = null;
-    try {
-      const workspaceDir = getWorkspaceDir(sessionKey);
-      const pkgPath = path.join(workspaceDir, "package.json");
-      if (fs.existsSync(pkgPath)) {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.sequelize) batchBlueprint = { database: "PostgreSQL" };
-      }
     } catch (err) {
-      console.error("codeValidator: could not infer architecture from package.json:", err.message);
-    }
+      // "Scoped edit failed: ..." errors come from applyScopedEdit when the
+      // model's raw output couldn't be parsed into valid SEARCH/REPLACE
+      // blocks (or none of the parsed blocks matched the existing file) --
+      // this is the same class of local-model non-determinism the retry
+      // loop above already handles for validator refusals, just surfaced
+      // as a thrown error instead of a returned issues array. Retry it the
+      // same way. A genuinely different error (Ollama unreachable, a
+      // required module missing, etc.) will have a different message and
+      // still fails immediately below.
+      const isRetryableParseFailure = typeof err.message === "string" && err.message.startsWith("Scoped edit failed:");
 
-    let alreadyAppliedModelFiles = [];
-    try {
-      const workspaceDir = getWorkspaceDir(sessionKey);
-      const modelsDir = path.join(workspaceDir, "backend", "models");
-      if (fs.existsSync(modelsDir)) {
-        const modelFilenames = fs.readdirSync(modelsDir).filter((f) => /\.[jt]sx?$/i.test(f));
-        alreadyAppliedModelFiles = modelFilenames
-          .filter((f) => !safetyCheck.resolvedPath.endsWith("models/" + f))
-          .map((f) => ({
-            path: "backend/models/" + f,
-            after: fs.readFileSync(path.join(modelsDir, f), "utf-8")
-          }));
+      if (isRetryableParseFailure && !isLastAttempt) {
+        console.log(`[handleWriteCommand] attempt ${attemptNum} failed (${err.message}), retrying...`);
+        continue;
       }
-    } catch (err) {
-      console.error("codeValidator: could not read already-applied model files:", err.message);
+
+      console.error("Content generation failed:", err.message);
+      return res.status(500).json({
+        success: false,
+        action: "generation_failed",
+        reason: err.message
+      });
     }
-
-    if (batchBlueprint) {
-      const currentFile = { path: targetPath, after: cleanedContent };
-      const codeValidationIssues = validateGeneratedCode(
-        [currentFile, ...alreadyAppliedModelFiles],
-        batchBlueprint
-      ).filter((issue) => issue.path === targetPath);
-
-      if (codeValidationIssues.length > 0) {
-        return res.json({
-          success: true,
-          action: "generation_refused",
-          reason: "The code validator found issue(s) that indicate this change will not work correctly.",
-          codeValidationIssues,
-          syntaxCheck: syntaxResult,
-          importCheck: importResult,
-          testCheck
-        });
-      }
-    }
-
-    createPendingWrite(sessionKey, {
-      mode,
-      targetPath,
-      resolvedPath: safetyCheck.resolvedPath,
-      fileExists,
-      before: fileExists ? existingContent : "",
-      after: cleanedContent,
-      patchWarnings,
-      syntaxCheck: syntaxResult,
-      importCheck: importResult,
-      lintCheck: lintResult,
-      testCheck
-    });
-
-    return res.json({
-      success: true,
-      action: "propose_write",
-      mode,
-      targetPath,
-      resolvedPath: safetyCheck.resolvedPath,
-      fileExists,
-      before: fileExists ? existingContent : "",
-      after: cleanedContent,
-      patchWarnings,
-      syntaxCheck: syntaxResult,
-      importCheck: importResult,
-      lintCheck: lintResult,
-      testCheck,
-    });
-  } catch (err) {
-    console.error("Content generation failed:", err.message);
-    return res.status(500).json({
-      success: false,
-      action: "generation_failed",
-      reason: err.message
-    });
   }
 }
 
