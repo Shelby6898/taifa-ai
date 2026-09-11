@@ -486,6 +486,18 @@ function Chat({ currentProject }) {
               ⚠️ no test file found for this source file — this change was not mechanically verified
             </p>
           )}
+          {Array.isArray(pendingWrite.lintCheck) && pendingWrite.lintCheck.length > 0 && (
+            <div className="panel-note panel-note-warn">
+              <p>lint check found {pendingWrite.lintCheck.length} issue(s):</p>
+              <ul className="plan-validation-issues">
+                {pendingWrite.lintCheck.map((issue, i) => (
+                  <li key={i}>
+                    {issue.rule ? <code>{issue.rule}</code> : null}{issue.line ? ` (line ${issue.line})` : ""}: {issue.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="diff-pair">
             <div className="diff-block">
               <div className="diff-label">before</div>
