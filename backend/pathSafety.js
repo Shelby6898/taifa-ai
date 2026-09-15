@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { getWorkspaceDir } = require("./workspaceResolver");
+const { ensureWorkspace } = require("./workspaceResolver");
 
 function isPathSafe(sessionKey, userPath) {
   if (!userPath || typeof userPath !== "string") {
@@ -11,7 +11,7 @@ function isPathSafe(sessionKey, userPath) {
     return { safe: false, reason: "Absolute paths are not allowed" };
   }
 
-  const workspaceDir = getWorkspaceDir(sessionKey);
+  const workspaceDir = ensureWorkspace(sessionKey);
   const workspaceReal = fs.realpathSync(workspaceDir);
   const resolvedPath = path.resolve(workspaceDir, userPath);
 
