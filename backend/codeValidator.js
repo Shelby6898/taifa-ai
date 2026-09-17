@@ -526,7 +526,100 @@ function checkFrontendBackendResponseMismatch(files) {
   return issues;
 }
 
-function validateGeneratedCode(files, blueprint) {
+// Check 10: destructured plain-export model. Mirrors checkBarrelWithoutDestructuring's
+// pattern but for the inverse mistake: a model file that exports the
+// Sequelize model DIRECTLY (`module.exports = sequelize.define(...)`,
+// not wrapped in an object and not the factory-function pattern already
+// covered by checkDirectFactoryRequire) gets destructured elsewhere
+// (`const { User } = require('../models/User')`) instead of assigned
+// directly (`const User = require('../models/User')`). Destructuring a
+// property that was never exported as a named key silently binds
+// undefined. Found live: userRoutes.js did this for User.js while
+// courseRoutes.js in the SAME batch correctly used the direct-assignment
+// form for the identical export style on Course.js -- proving this is a
+// real, inconsistent mistake the model makes, not a deliberate choice.
+function isPlainDefineExportModel(modelFileContent) {
+  return /module\.exports\s*=\s*sequelize\.define\s*\(/.test(modelFileContent);
+}
+
+function checkDestructuredPlainExport(files) {
+  const issues = [];
+
+  const plainExportModelNames = new Set();
+  for (const file of files) {
+    if (/models\//i.test(file.path)) {
+      const base = file.path.split("/").pop().replace(/\.[jt]sx?$/i, "");
+      if (isPlainDefineExportModel(file.after || "")) {
+        plainExportModelNames.add(base);
+      }
+    }
+  }
+  if (plainExportModelNames.size === 0) return issues;
+
+  for (const file of files) {
+    if (/models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    for (const modelName of plainExportModelNames) {
+      const destructurePattern = new RegExp(`\\{[^}]*\\b${modelName}\\b[^}]*\\}\\s*=\\s*require\\s*\\(\\s*['"][^'"]*\\/models\\/${modelName}['"]\\s*\\)`);
+      if (destructurePattern.test(content)) {
+        issues.push({
+          path: file.path,
+          type: "destructured_plain_export",
+          detail: `Destructures "{ ${modelName} }" from its model file, but ${modelName}.js exports the model directly (\`module.exports = sequelize.define(...)\`), not as a named property -- this binds ${modelName} to undefined. Use "const ${modelName} = require('../models/${modelName}')" instead.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+// Check 11: missing database connection module. Model files commonly
+// require a relative connection module ('../db', '../database',
+// '../sequelize', '../connection') assuming it already exists, but
+// nothing in the current batch creates one and it may never have been
+// created in any earlier batch either. Scoped deliberately narrow: only
+// files under models/, only these 4 specific basenames (the ones
+// actually observed live -- Property.js requiring '../database' in one
+// batch, User/Course/Registration.js requiring '../db' in another, both
+// real batches generated tonight) -- a broad "any missing relative
+// require" check would have far too many false positives (intentional
+// future files, files from batches outside what this validator can
+// see). Existence is checked against existingConnectionModules, a Set
+// gathered by the CALLER via real fs.existsSync checks against the
+// actual workspace on disk -- deliberately not just the current batch's
+// files, specifically to avoid falsely flagging a connection module
+// that was legitimately created in an earlier batch this validator has
+// no other visibility into.
+const CONNECTION_MODULE_BASENAMES = ["db", "database", "sequelize", "connection"];
+
+function checkMissingConnectionModule(files, existingConnectionModules) {
+  const issues = [];
+  const existing = existingConnectionModules || new Set();
+
+  const requirePattern = /require\(\s*['"](\.\.?\/(?:[^'"\/]+\/)*(db|database|sequelize|connection))['"]\s*\)/g;
+
+  for (const file of files) {
+    if (!/models\//i.test(file.path)) continue;
+    const content = file.after || "";
+
+    let match;
+    while ((match = requirePattern.exec(content)) !== null) {
+      const requiredPath = match[1];
+      const basename = match[2];
+      if (!existing.has(basename)) {
+        issues.push({
+          path: file.path,
+          type: "missing_connection_module",
+          detail: `Requires "${requiredPath}" as its database connection, but no ${basename}.js file exists in the workspace yet (from this batch or an earlier one) -- this will throw "Cannot find module" the moment ${file.path} loads.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+function validateGeneratedCode(files, blueprint, existingConnectionModules) {
   return [
     ...checkOrmMethodMismatch(files, blueprint),
     ...checkUnimportedModelUsage(files),
@@ -536,7 +629,9 @@ function validateGeneratedCode(files, blueprint) {
     ...checkDirectFactoryRequire(files),
     ...checkBarrelWithoutDestructuring(files),
     ...checkUndefinedAssociationTarget(files),
-    ...checkFrontendBackendResponseMismatch(files)
+    ...checkFrontendBackendResponseMismatch(files),
+    ...checkDestructuredPlainExport(files),
+    ...checkMissingConnectionModule(files, existingConnectionModules)
   ];
 }
 
@@ -550,5 +645,8 @@ module.exports = {
   checkDirectFactoryRequire,
   checkBarrelWithoutDestructuring,
   checkUndefinedAssociationTarget,
-  checkFrontendBackendResponseMismatch
+  checkFrontendBackendResponseMismatch,
+  checkDestructuredPlainExport,
+  checkMissingConnectionModule,
+  CONNECTION_MODULE_BASENAMES
 };

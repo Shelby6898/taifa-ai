@@ -186,8 +186,8 @@ function sendChatResponse(res, sessionKey, payload) {
   return res.json(payload);
 }
 
-function buildFullPrompt(userPrompt, history, sessionKey) {
-  const memoryBlock = formatMemoryBlock(sessionKey);
+async function buildFullPrompt(userPrompt, history, sessionKey) {
+  const memoryBlock = await formatMemoryBlock(sessionKey);
   const historyBlock = formatHistory(history);
   const matches = searchIndex(sessionKey, userPrompt, 3);
   let contextBlock = "";
@@ -457,11 +457,25 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
         console.error("codeValidator: could not read already-applied model files:", err.message);
       }
 
+      let existingConnectionModules = new Set();
+      try {
+        const workspaceDir = getWorkspaceDir(sessionKey);
+        const { CONNECTION_MODULE_BASENAMES } = require("./codeValidator");
+        for (const name of CONNECTION_MODULE_BASENAMES) {
+          if (fs.existsSync(path.join(workspaceDir, "backend", name + ".js"))) {
+            existingConnectionModules.add(name);
+          }
+        }
+      } catch (err) {
+        console.error("codeValidator: could not check for existing connection module:", err.message);
+      }
+
       if (batchBlueprint) {
         const currentFile = { path: targetPath, after: cleanedContent };
         const codeValidationIssues = validateGeneratedCode(
           [currentFile, ...alreadyAppliedModelFiles],
-          batchBlueprint
+          batchBlueprint,
+          existingConnectionModules
         ).filter((issue) => issue.path === targetPath);
 
         if (codeValidationIssues.length > 0) {
@@ -1147,7 +1161,7 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
     });
   }
 
-  if (hasPendingPlan(sessionKey)) {
+  if (await hasPendingPlan(sessionKey)) {
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -1155,8 +1169,8 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
     });
   }
 
-  if (hasActiveCampaign(sessionKey)) {
-    const campaign = getActiveCampaign(sessionKey);
+  if (await hasActiveCampaign(sessionKey)) {
+    const campaign = await getActiveCampaign(sessionKey);
     return res.status(409).json({
       success: false,
       action: "plan_rejected",
@@ -1171,7 +1185,7 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
       reason: "A clarification session is already in progress. Answer the pending question before starting something new."
     });
   }
-  const memoryBlock = formatMemoryBlock(sessionKey);
+  const memoryBlock = await formatMemoryBlock(sessionKey);
   const hasMemory = memoryBlock.length > 0;
   const questions = hasMemory ? SHORT_PLANNING_QUESTIONS : FIXED_PLANNING_QUESTIONS;
   const memoryContext = hasMemory ? memoryBlock : null;
@@ -1357,11 +1371,11 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
     if (allFiles.length > MAX_PLAN_FILES) {
       const remainingFiles = allFiles.slice(MAX_PLAN_FILES);
       firstBatchFiles = allFiles.slice(0, MAX_PLAN_FILES);
-      const campaign = startCampaign(sessionKey, { description, remainingFiles });
+      const campaign = await startCampaign(sessionKey, { description, remainingFiles });
       campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
     }
 
-    const plan = createPlan(sessionKey, { description, files: firstBatchFiles });
+    const plan = await createPlan(sessionKey, { description, files: firstBatchFiles });
 
     return res.json({
       success: true,
@@ -1386,69 +1400,74 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
 }
 
 
-function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
-  if (executePlanCommand.malformed) {
-    return res.status(400).json({
-      success: false,
-      action: "plan_rejected",
-      reason: executePlanCommand.reason
+async function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
+  try {
+    if (executePlanCommand.malformed) {
+      return res.status(400).json({
+        success: false,
+        action: "plan_rejected",
+        reason: executePlanCommand.reason
+      });
+    }
+
+    if (await hasPendingPlan(sessionKey)) {
+      return res.status(409).json({
+        success: false,
+        action: "plan_rejected",
+        reason: "A plan is already pending review. Approve or reject it before starting a new one."
+      });
+    }
+
+    if (await hasActiveCampaign(sessionKey)) {
+      const campaign = await getActiveCampaign(sessionKey);
+      return res.status(409).json({
+        success: false,
+        action: "plan_rejected",
+        reason: "A multi-batch task is already in progress (batch " + campaign.batchNumber + "). Approve or reject the current batch before starting something new."
+      });
+    }
+
+    const allFiles = executePlanCommand.files;
+    const estimatedFiles = allFiles.length;
+
+    // No blueprint exists for human-supplied plans (executePlanCommandParser
+    // only parses description + files), so checkVocabularyConsistency is
+    // skipped — it no-ops gracefully without a blueprint anyway. The other
+    // two checks only need description + files, both available here, so a
+    // human can still be caught forgetting an explicitly-required area or
+    // including an explicitly-excluded one, same as an AI-generated plan.
+    const validationIssues = [
+      ...checkExcludedScope(allFiles, executePlanCommand.description),
+      ...checkMissingRequiredScope(allFiles, executePlanCommand.description)
+    ];
+
+    let campaignInfo = null;
+    let firstBatchFiles = allFiles;
+    if (allFiles.length > MAX_PLAN_FILES) {
+      const remainingFiles = allFiles.slice(MAX_PLAN_FILES);
+      firstBatchFiles = allFiles.slice(0, MAX_PLAN_FILES);
+      const campaign = await startCampaign(sessionKey, { description: executePlanCommand.description, remainingFiles });
+      campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
+    }
+
+    const plan = await createPlan(sessionKey, { description: executePlanCommand.description, files: firstBatchFiles });
+
+    return res.json({
+      success: true,
+      action: "plan_proposed",
+      planId: plan.id,
+      description: plan.description,
+      files: plan.files,
+      estimatedFiles,
+      incomplete: allFiles.length > MAX_PLAN_FILES,
+      validationIssues,
+      campaign: campaignInfo,
+      isHumanSupplied: true
     });
+  } catch (err) {
+    console.error("[planState] handleExecutePlanCommand failed:", err.message);
+    return res.status(500).json({ success: false, action: "plan_rejected", reason: "Internal error while creating plan." });
   }
-
-  if (hasPendingPlan(sessionKey)) {
-    return res.status(409).json({
-      success: false,
-      action: "plan_rejected",
-      reason: "A plan is already pending review. Approve or reject it before starting a new one."
-    });
-  }
-
-  if (hasActiveCampaign(sessionKey)) {
-    const campaign = getActiveCampaign(sessionKey);
-    return res.status(409).json({
-      success: false,
-      action: "plan_rejected",
-      reason: "A multi-batch task is already in progress (batch " + campaign.batchNumber + "). Approve or reject the current batch before starting something new."
-    });
-  }
-
-  const allFiles = executePlanCommand.files;
-  const estimatedFiles = allFiles.length;
-
-  // No blueprint exists for human-supplied plans (executePlanCommandParser
-  // only parses description + files), so checkVocabularyConsistency is
-  // skipped — it no-ops gracefully without a blueprint anyway. The other
-  // two checks only need description + files, both available here, so a
-  // human can still be caught forgetting an explicitly-required area or
-  // including an explicitly-excluded one, same as an AI-generated plan.
-  const validationIssues = [
-    ...checkExcludedScope(allFiles, executePlanCommand.description),
-    ...checkMissingRequiredScope(allFiles, executePlanCommand.description)
-  ];
-
-  let campaignInfo = null;
-  let firstBatchFiles = allFiles;
-  if (allFiles.length > MAX_PLAN_FILES) {
-    const remainingFiles = allFiles.slice(MAX_PLAN_FILES);
-    firstBatchFiles = allFiles.slice(0, MAX_PLAN_FILES);
-    const campaign = startCampaign(sessionKey, { description: executePlanCommand.description, remainingFiles });
-    campaignInfo = { campaignId: campaign.id, batchNumber: campaign.batchNumber };
-  }
-
-  const plan = createPlan(sessionKey, { description: executePlanCommand.description, files: firstBatchFiles });
-
-  return res.json({
-    success: true,
-    action: "plan_proposed",
-    planId: plan.id,
-    description: plan.description,
-    files: plan.files,
-    estimatedFiles,
-    incomplete: allFiles.length > MAX_PLAN_FILES,
-    validationIssues,
-    campaign: campaignInfo,
-    isHumanSupplied: true
-  });
 }
 
 app.post("/api/chat", requireAuth, async (req, res) => {
@@ -1456,19 +1475,27 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const sessionKey = getSessionKey(req);
 
   const originalJson = res.json.bind(res);
-  res.json = (payload) => {
+  res.json = async (payload) => {
     if (payload && payload.action) {
-      appendAssistantTurn(sessionKey, {
-        action: payload.action,
-        data: payload,
-        content: summarizeForModel(payload)
-      });
+      try {
+        await appendAssistantTurn(sessionKey, {
+          action: payload.action,
+          data: payload,
+          content: summarizeForModel(payload)
+        });
+      } catch (err) {
+        console.error("[conversationHistory] Failed to save assistant turn:", err.message);
+      }
     }
     return originalJson(payload);
   };
 
   if (prompt) {
-    appendUserTurn(sessionKey, prompt);
+    try {
+      await appendUserTurn(sessionKey, prompt);
+    } catch (err) {
+      console.error("[conversationHistory] Failed to save user turn:", err.message);
+    }
   }
 
   if (!prompt) {
@@ -1644,13 +1671,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         reason: "No fact provided. Use: remember: some fact about this project"
       });
     }
-    const result = addFact(sessionKey, rememberCommand.fact);
+    const result = await addFact(sessionKey, rememberCommand.fact);
     return res.json({
       success: true,
       action: "fact_remembered",
       fact: rememberCommand.fact,
       alreadyKnown: !result.added,
-      totalFacts: result.facts.length
+      totalFacts: result.totalFacts
     });
   }
 
@@ -1697,7 +1724,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   const executePlanCommand = parseExecutePlanCommand(prompt);
   if (executePlanCommand.isExecutePlanCommand) {
-    return handleExecutePlanCommand(executePlanCommand, res, sessionKey);
+    return await handleExecutePlanCommand(executePlanCommand, res, sessionKey);
   }
 
   const planCommand = parsePlanCommand(prompt);
@@ -1727,8 +1754,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       reason: "There's a pending file write awaiting your decision. Please use the approve/reject buttons above rather than typing a reply."
     });
   }
-  if (hasPendingPlan(sessionKey)) {
-    const pendingPlan = getPendingPlan(sessionKey);
+  if (await hasPendingPlan(sessionKey)) {
+    const pendingPlan = await getPendingPlan(sessionKey);
     const stageLabel = pendingPlan.stage === "diffs_proposed" ? "diffs" : "plan";
     return res.status(400).json({
       success: false,
@@ -1744,7 +1771,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     });
   }
 
-  const fullPrompt = buildFullPrompt(prompt, loadHistory(sessionKey), sessionKey);
+  const fullPrompt = await buildFullPrompt(prompt, await loadHistory(sessionKey), sessionKey);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -1765,7 +1792,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       { responseType: "stream" }
     );
 
-    const processOllamaLine = (line) => {
+    const processOllamaLine = async (line) => {
       if (!line.trim() || streamFinished) return;
 
       try {
@@ -1779,11 +1806,15 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         if (parsed.done && !streamFinished) {
           streamFinished = true;
 
-          appendAssistantTurn(sessionKey, {
-            action: "chat_reply",
-            data: { content: accumulatedResponse },
-            content: accumulatedResponse
-          });
+          try {
+            await appendAssistantTurn(sessionKey, {
+              action: "chat_reply",
+              data: { content: accumulatedResponse },
+              content: accumulatedResponse
+            });
+          } catch (err) {
+            console.error("[conversationHistory] Failed to save assistant turn:", err.message);
+          }
 
           res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
           res.end();
@@ -1793,30 +1824,34 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       }
     };
 
-    response.data.on("data", (chunk) => {
+    response.data.on("data", async (chunk) => {
       ollamaBuffer += chunk.toString();
 
       const lines = ollamaBuffer.split("\n");
       ollamaBuffer = lines.pop() || "";
 
       for (const line of lines) {
-        processOllamaLine(line);
+        await processOllamaLine(line);
       }
     });
 
-    response.data.on("end", () => {
+    response.data.on("end", async () => {
       if (ollamaBuffer.trim() && !streamFinished) {
-        processOllamaLine(ollamaBuffer);
+        await processOllamaLine(ollamaBuffer);
       }
 
       if (!streamFinished) {
         streamFinished = true;
 
-        appendAssistantTurn(sessionKey, {
-          action: "chat_reply",
-          data: { content: accumulatedResponse },
-          content: accumulatedResponse
-        });
+        try {
+          await appendAssistantTurn(sessionKey, {
+            action: "chat_reply",
+            data: { content: accumulatedResponse },
+            content: accumulatedResponse
+          });
+        } catch (err) {
+          console.error("[conversationHistory] Failed to save assistant turn:", err.message);
+        }
 
         res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
         res.end();
@@ -1894,56 +1929,71 @@ app.post("/api/write/reject", requireAuth, (req, res) => {
   res.json({ success: true, action: "write_rejected_ack" });
 });
 
-app.get("/api/plan/current", requireAuth, (req, res) => {
-  const sessionKey = getSessionKey(req);
-  const plan = getPendingPlan(sessionKey);
-  if (!plan) {
-    return res.json({ success: false, reason: "No pending plan" });
+app.get("/api/plan/current", requireAuth, async (req, res) => {
+  try {
+    const sessionKey = getSessionKey(req);
+    const plan = await getPendingPlan(sessionKey);
+    if (!plan) {
+      return res.json({ success: false, reason: "No pending plan" });
+    }
+    return res.json({ success: true, plan });
+  } catch (err) {
+    console.error("[planState] /api/plan/current failed:", err.message);
+    return res.status(500).json({ success: false, reason: "Internal error" });
   }
-  return res.json({ success: true, plan });
 });
 
 // Read-only debug/inspection endpoint: exposes the full active campaign,
 // including remainingFiles, which /api/plan/current does not surface
 // (it only shows the current batch). Useful for verifying multi-batch
 // plans in full rather than one batch at a time.
-app.get("/api/campaign/current", requireAuth, (req, res) => {
-  const sessionKey = getSessionKey(req);
-  const campaign = getActiveCampaign(sessionKey);
-  if (!campaign) {
-    return res.json({ success: false, reason: "No active campaign" });
+app.get("/api/campaign/current", requireAuth, async (req, res) => {
+  try {
+    const sessionKey = getSessionKey(req);
+    const campaign = await getActiveCampaign(sessionKey);
+    if (!campaign) {
+      return res.json({ success: false, reason: "No active campaign" });
+    }
+    return res.json({ success: true, campaign });
+  } catch (err) {
+    console.error("[planState] /api/campaign/current failed:", err.message);
+    return res.status(500).json({ success: false, reason: "Internal error" });
   }
-  return res.json({ success: true, campaign });
 });
 
-app.post("/api/plan/reject", requireAuth, (req, res) => {
-  const sessionKey = getSessionKey(req);
-  const { planId } = req.body;
+app.post("/api/plan/reject", requireAuth, async (req, res) => {
+  try {
+    const sessionKey = getSessionKey(req);
+    const { planId } = req.body;
 
-  if (!isValidPlanId(sessionKey, planId)) {
-    return res.status(400).json({ success: false, reason: "No matching pending plan to reject." });
+    if (!(await isValidPlanId(sessionKey, planId))) {
+      return res.status(400).json({ success: false, reason: "No matching pending plan to reject." });
+    }
+
+    await clearPlan(sessionKey, "rejected");
+
+    let campaignCleared = false;
+    if (await hasActiveCampaign(sessionKey)) {
+      await clearCampaign(sessionKey, "rejected");
+      campaignCleared = true;
+    }
+
+    return res.json({ success: true, action: "plan_cleared", campaignCleared });
+  } catch (err) {
+    console.error("[planState] /api/plan/reject failed:", err.message);
+    return res.status(500).json({ success: false, reason: "Internal error" });
   }
-
-  clearPlan(sessionKey);
-
-  let campaignCleared = false;
-  if (hasActiveCampaign(sessionKey)) {
-    clearCampaign(sessionKey);
-    campaignCleared = true;
-  }
-
-  return res.json({ success: true, action: "plan_cleared", campaignCleared });
 });
 
 app.post("/api/plan/approve", requireAuth, async (req, res) => {
   const sessionKey = getSessionKey(req);
   const { planId } = req.body;
 
-  if (!isValidPlanId(sessionKey, planId)) {
+  if (!await isValidPlanId(sessionKey, planId)) {
     return res.status(400).json({ success: false, reason: "No matching pending plan to approve." });
   }
 
-  const plan = getPendingPlan(sessionKey);
+  const plan = await getPendingPlan(sessionKey);
 
   if (plan.stage !== "plan_proposed") {
     return res.status(400).json({
@@ -2081,19 +2131,30 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       console.error("codeValidator: could not read already-applied model files:", err.message);
     }
 
+    let existingConnectionModules = new Set();
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const { CONNECTION_MODULE_BASENAMES } = require("./codeValidator");
+      for (const name of CONNECTION_MODULE_BASENAMES) {
+        if (fs.existsSync(path.join(workspaceDir, "backend", name + ".js"))) {
+          existingConnectionModules.add(name);
+        }
+      }
+    } catch (err) {
+      console.error("codeValidator: could not check for existing connection module:", err.message);
+    }
+
     console.log("[codeValidator debug] workspaceDir models check -- alreadyAppliedModelFiles.length:", alreadyAppliedModelFiles.length, alreadyAppliedModelFiles.map(f => f.path));
     console.log("[codeValidator debug] batchBlueprint:", JSON.stringify(batchBlueprint));
-    const codeValidationIssues = validateGeneratedCode([...enrichedFiles, ...alreadyAppliedModelFiles], batchBlueprint)
+    const codeValidationIssues = validateGeneratedCode([...enrichedFiles, ...alreadyAppliedModelFiles], batchBlueprint, existingConnectionModules)
       .filter((issue) => enrichedFiles.some((ef) => ef.path === issue.path));
     console.log("[codeValidator debug] issues found:", codeValidationIssues.length, JSON.stringify(codeValidationIssues));
 
-    const enrichResult = enrichWithDiffs(sessionKey, planId, enrichedFiles);
+    const enrichResult = await enrichWithDiffs(sessionKey, planId, enrichedFiles, codeValidationIssues);
 
     if (!enrichResult.success) {
       return res.status(400).json({ success: false, reason: enrichResult.reason });
     }
-
-    enrichResult.plan.codeValidationIssues = codeValidationIssues;
 
     return res.json({
       success: true,
@@ -2114,14 +2175,14 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
 // same project can skip re-asking about tech stack, platform, and
 // security that's already established, instead of treating every
 // incremental feature as a brand-new project from scratch.
-function saveArchitectureToMemory(description, sessionKey) {
+async function saveArchitectureToMemory(description, sessionKey) {
   const match = description.match(/Agreed architecture \(technology choices below are binding, not suggestions\):\s*(\{[\s\S]*\})/);
   if (!match) return;
 
   try {
     const blueprint = lenientJsonParse(match[1]);
     const fact = `Established project architecture: ${blueprint.frontend} frontend, ${blueprint.backend} backend, ${blueprint.database} database, ${blueprint.authentication} authentication.`;
-    addFact(sessionKey, fact);
+    await addFact(sessionKey, fact);
   } catch (err) {
     console.error("Could not save architecture to project memory:", err.message);
   }
@@ -2131,11 +2192,11 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
   const { planId } = req.body;
   const sessionKey = getSessionKey(req);
 
-  if (!isValidPlanId(sessionKey, planId)) {
+  if (!await isValidPlanId(sessionKey, planId)) {
     return res.status(400).json({ success: false, reason: "No matching pending plan to apply." });
   }
 
-  const plan = getPendingPlan(sessionKey);
+  const plan = await getPendingPlan(sessionKey);
 
   if (plan.stage !== "diffs_proposed") {
     return res.status(400).json({
@@ -2181,10 +2242,10 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
   }
 
   const appliedPaths = results.map((r) => r.path);
-  clearPlan(sessionKey);
-  saveArchitectureToMemory(plan.description, sessionKey);
+  await clearPlan(sessionKey, "applied");
+  await saveArchitectureToMemory(plan.description, sessionKey);
 
-  if (!hasActiveCampaign(sessionKey)) {
+  if (!await hasActiveCampaign(sessionKey)) {
     return res.json({
       success: true,
       action: "plan_applied",
@@ -2192,18 +2253,18 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     });
   }
 
-  const campaignBefore = getActiveCampaign(sessionKey);
-  recordBatchCompletion(sessionKey, campaignBefore.id, appliedPaths);
+  const campaignBefore = await getActiveCampaign(sessionKey);
+  await recordBatchCompletion(sessionKey, campaignBefore.id, appliedPaths);
 
   try {
     syncReindexWorkspace(sessionKey);
 
-    const campaign = getActiveCampaign(sessionKey);
-    const { files: nextFiles, remainingCount } = takeNextBatch(sessionKey, campaign.id, MAX_PLAN_FILES);
+    const campaign = await getActiveCampaign(sessionKey);
+    const { files: nextFiles, remainingCount } = await takeNextBatch(sessionKey, campaign.id, MAX_PLAN_FILES);
 
     if (!Array.isArray(nextFiles) || nextFiles.length === 0) {
       const finishedCampaign = campaign;
-      clearCampaign(sessionKey);
+      await clearCampaign(sessionKey, "completed");
       return res.json({
         success: true,
         action: "plan_applied",
@@ -2213,7 +2274,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
       });
     }
 
-    const nextPlan = createPlan(sessionKey, { description: campaign.description, files: nextFiles });
+    const nextPlan = await createPlan(sessionKey, { description: campaign.description, files: nextFiles });
 
     return res.json({
       success: true,
@@ -2229,7 +2290,7 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Batch continuation failed:", err.message);
-    clearCampaign(sessionKey);
+    await clearCampaign(sessionKey, "failed", err.message);
     return res.json({
       success: true,
       action: "plan_applied",
@@ -2298,7 +2359,7 @@ app.post("/api/projects", requireAuth, (req, res) => {
   }
 });
 
-app.delete("/api/projects/:projectName", requireAuth, (req, res) => {
+app.delete("/api/projects/:projectName", requireAuth, async (req, res) => {
   try {
     const projectName = req.params.projectName;
 
@@ -2325,7 +2386,7 @@ app.delete("/api/projects/:projectName", requireAuth, (req, res) => {
     const { sanitizeKeyPart } = require("./sanitize");
     const sessionKey = `${sanitizeKeyPart(studentId)}:${sanitizeKeyPart(projectName)}`;
 
-    const result = deleteProject(sessionKey);
+    const result = await deleteProject(sessionKey);
 
     return res.json(result);
   } catch (err) {
@@ -2356,81 +2417,91 @@ app.get("/api/files", requireAuth, (req, res) => {
   }
 });
 
-app.get("/api/session/current", requireAuth, (req, res) => {
-  const sessionKey = getSessionKey(req);
+app.get("/api/session/current", requireAuth, async (req, res) => {
+  try {
+    const sessionKey = getSessionKey(req);
 
-  if (hasPendingAction(sessionKey)) {
-    return res.json({ success: true, pending: "toolAction", data: getPendingAction(sessionKey) });
-  }
-
-  if (hasPendingPlan(sessionKey)) {
-    const plan = getPendingPlan(sessionKey);
-    if (plan.stage === "diffs_proposed") {
-      return res.json({ success: true, pending: "diffs", data: { planId: plan.id, files: plan.files, codeValidationIssues: plan.codeValidationIssues || [] } });
-    }
-    return res.json({ success: true, pending: "plan", data: { planId: plan.id, description: plan.description, files: plan.files } });
-  }
-
-  if (hasPendingWrite(sessionKey)) {
-    return res.json({ success: true, pending: "write", data: getPendingWrite(sessionKey) });
-  }
-
-  if (hasPendingClarification(sessionKey)) {
-    const clarification = getPendingClarification(sessionKey);
-    const phase = getPhase(sessionKey);
-
-    if (phase === "blueprint") {
-      return res.json({
-        success: true,
-        pending: "architectureBlueprint",
-        data: {
-          blueprint: clarification.blueprint,
-          message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
-        }
-      });
+    if (hasPendingAction(sessionKey)) {
+      return res.json({ success: true, pending: "toolAction", data: getPendingAction(sessionKey) });
     }
 
-    if (phase === "architecture") {
-      return res.json({
-        success: true,
-        pending: "architectureContextCheck",
-        data: {
-          relevantFiles: clarification.relevantFiles,
-          message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
-        }
-      });
-    }
-
-    if (phase === "summary") {
-      return res.json({
-        success: true,
-        pending: "requirementsSummary",
-        data: {
-          summary: clarification.summaryText,
-          message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or tell me what to add or change."
-        }
-      });
-    }
-
-    return res.json({
-      success: true,
-      pending: "clarificationQuestion",
-      data: {
-        question: getCurrentQuestion(sessionKey),
-        questionNumber: clarification.currentIndex + 1,
-        totalQuestions: clarification.questions.length,
-        usingProjectMemory: !!clarification.memoryContext
+    if (await hasPendingPlan(sessionKey)) {
+      const plan = await getPendingPlan(sessionKey);
+      if (plan.stage === "diffs_proposed") {
+        return res.json({ success: true, pending: "diffs", data: { planId: plan.id, files: plan.files, codeValidationIssues: plan.codeValidationIssues || [] } });
       }
-    });
-  }
+      return res.json({ success: true, pending: "plan", data: { planId: plan.id, description: plan.description, files: plan.files } });
+    }
 
-  return res.json({ success: true, pending: null });
+    if (hasPendingWrite(sessionKey)) {
+      return res.json({ success: true, pending: "write", data: getPendingWrite(sessionKey) });
+    }
+
+    if (hasPendingClarification(sessionKey)) {
+      const clarification = getPendingClarification(sessionKey);
+      const phase = getPhase(sessionKey);
+
+      if (phase === "blueprint") {
+        return res.json({
+          success: true,
+          pending: "architectureBlueprint",
+          data: {
+            blueprint: clarification.blueprint,
+            message: "Here's the proposed architecture. Reply \"looks good\" to proceed, or tell me specifically what to change (for example: \"use PostgreSQL instead of MongoDB\")."
+          }
+        });
+      }
+
+      if (phase === "architecture") {
+        return res.json({
+          success: true,
+          pending: "architectureContextCheck",
+          data: {
+            relevantFiles: clarification.relevantFiles,
+            message: "These existing files look relevant to this task. Reply with something like \"looks good\" to proceed, or describe what's missing or incorrect."
+          }
+        });
+      }
+
+      if (phase === "summary") {
+        return res.json({
+          success: true,
+          pending: "requirementsSummary",
+          data: {
+            summary: clarification.summaryText,
+            message: "Does this accurately capture your requirements? Reply \"approve\" to continue, or tell me what to add or change."
+          }
+        });
+      }
+
+      return res.json({
+        success: true,
+        pending: "clarificationQuestion",
+        data: {
+          question: getCurrentQuestion(sessionKey),
+          questionNumber: clarification.currentIndex + 1,
+          totalQuestions: clarification.questions.length,
+          usingProjectMemory: !!clarification.memoryContext
+        }
+      });
+    }
+
+    return res.json({ success: true, pending: null });
+  } catch (err) {
+    console.error("[planState] /api/session/current failed:", err.message);
+    return res.status(500).json({ success: false, reason: "Internal error" });
+  }
 });
 
-app.get("/api/chat/history", requireAuth, (req, res) => {
-  const sessionKey = getSessionKey(req);
-  const history = loadHistory(sessionKey);
-  res.json({ success: true, history });
+app.get("/api/chat/history", requireAuth, async (req, res) => {
+  try {
+    const sessionKey = getSessionKey(req);
+    const history = await loadHistory(sessionKey);
+    res.json({ success: true, history });
+  } catch (err) {
+    console.error("[conversationHistory] Failed to load history:", err.message);
+    res.status(500).json({ success: false, error: "Failed to load history" });
+  }
 });
 
 app.listen(5000, () => {
