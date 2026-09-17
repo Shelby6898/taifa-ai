@@ -16,3 +16,4 @@ frontend/build/
 *.swp
 backend/data/
 workspace/
+logfile

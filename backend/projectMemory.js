@@ -1,73 +1,43 @@
-const fs = require("fs");
-const path = require("path");
-const { sanitizeKeyPart } = require("./sessionKey");
+const { pool } = require("./db");
+const { getOrCreateProjectId } = require("./projectResolver");
 
-const MAX_FACTS = 20;
-
-function memoryPathFor(sessionKey) {
-  const [studentId, projectName] = sessionKey.split(":");
-  const filename = `${sanitizeKeyPart(studentId)}__${sanitizeKeyPart(projectName)}.json`;
-  return path.join(__dirname, "memory", filename);
+async function addFact(sessionKey, fact) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query(
+    "INSERT INTO project_memory_facts (project_id, fact) VALUES ($1, $2)",
+    [projectId, fact]
+  );
+  const { rows } = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM project_memory_facts WHERE project_id = $1",
+    [projectId]
+  );
+  return { added: true, totalFacts: rows[0].count };
 }
 
-function loadMemory(sessionKey) {
-  const memoryPath = memoryPathFor(sessionKey);
-  if (!fs.existsSync(memoryPath)) {
-    return [];
-  }
-  try {
-    return JSON.parse(fs.readFileSync(memoryPath, "utf-8"));
-  } catch (err) {
-    console.error("[projectMemory] Failed to parse memory file, starting fresh:", err.message);
-    return [];
-  }
+async function getAllFacts(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT fact FROM project_memory_facts WHERE project_id = $1 ORDER BY created_at",
+    [projectId]
+  );
+  return rows.map((r) => r.fact);
 }
 
-function saveMemory(sessionKey, facts) {
-  const memoryPath = memoryPathFor(sessionKey);
-  fs.mkdirSync(path.dirname(memoryPath), { recursive: true });
-  fs.writeFileSync(memoryPath, JSON.stringify(facts, null, 2));
-}
-
-function addFact(sessionKey, fact) {
-  const facts = loadMemory(sessionKey);
-
-  if (facts.includes(fact)) {
-    return { added: false, reason: "Already remembered", facts };
-  }
-
-  facts.push(fact);
-
-  while (facts.length > MAX_FACTS) {
-    facts.shift();
-  }
-
-  saveMemory(sessionKey, facts);
-  return { added: true, facts };
-}
-
-function getAllFacts(sessionKey) {
-  return loadMemory(sessionKey);
-}
-
-function formatMemoryBlock(sessionKey) {
-  const facts = loadMemory(sessionKey);
+async function formatMemoryBlock(sessionKey) {
+  const facts = await getAllFacts(sessionKey);
   if (facts.length === 0) {
     return "";
   }
   return `Project memory (persistent facts about this project):\n${facts.map((f) => `- ${f}`).join("\n")}\n\n`;
 }
 
-function clearMemory(sessionKey) {
-  const memoryPath = memoryPathFor(sessionKey);
-
-  if (!fs.existsSync(memoryPath)) {
-    return false;
-  }
-
-  fs.unlinkSync(memoryPath);
-  console.log(`[projectMemory] Deleted memory for ${sessionKey}`);
-  return true;
+async function clearMemory(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const result = await pool.query(
+    "DELETE FROM project_memory_facts WHERE project_id = $1",
+    [projectId]
+  );
+  return result.rowCount > 0;
 }
 
 module.exports = { addFact, getAllFacts, formatMemoryBlock, clearMemory };
