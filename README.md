@@ -10,6 +10,7 @@ Browser (React, :3000)
 Express backend (:5000)
 Ollama (:11434)
 qwen2.5-coder:3b (3.1B params, 32768 max context; no custom num_ctx set, so it runs at Ollama's built-in runtime default rather than the model's max)
+PostgreSQL (local, `taifa_ai` database) — durable, relational state: project memory facts, conversation history, plans and multi-batch campaigns. Session-derived caches (file index, import/component/DB-schema graphs) stay on disk as JSON, rebuilt from source rather than treated as source of truth.
 
 The backend is multi-tenant: every request is scoped to a session key (`studentId:projectName`), and each student's project gets its own workspace directory (`workspace/<studentId>/<projectName>/`), its own file index and dependency graphs, its own file watcher (created on first use, closed after 25 minutes idle, transparently recreated on next use), and its own conversation history — all fully isolated from every other student and every other project. See the Phase 6 section below for the full breakdown.
 
@@ -102,6 +103,19 @@ The backend is multi-tenant: every request is scoped to a session key (`studentI
 
 **UI polish.** The frontend already had a well-built design-token system and dedicated visual panels for most pending-action types (proposed writes, proposed plans, diff review, tool-action approval) that had simply never been wired up for the architecture-blueprint step — it was rendering as one flattened paragraph of joined text. Rebuilt as a proper structured panel (frontend/backend/database/authentication/storage/collections/modules/estimated files as labeled fields) with a matching approve action, consistent with every other pending-action panel in the app.
 
+### Phase 7 — Persistent Storage Migration and Deeper Validator Coverage
+
+**PostgreSQL migration.** Project memory facts, conversation history, and plan/campaign state previously lived as one JSON file per session per data type — durable across restarts, but with no partial-update safety (a full read-modify-rewrite of the whole file on every change), no relational integrity between students/projects/plans beyond a filename convention, and no way to query across sessions. `projectMemory.js`, `conversationHistory.js`, and `planState.js` were rewritten against a real PostgreSQL schema (`students`, `projects`, `conversation_messages`, `project_memory_facts`, `plans`, `plan_campaigns`), reached through a small connection-pool module (`db.js`) and a `getOrCreateProjectId(sessionKey)` helper (`projectResolver.js`) that lazily creates student/project rows the same way the old system lazily created files. Every table was designed against the actual source code and actual on-disk JSON shapes rather than assumed, including two corrections to earlier documentation this process itself surfaced: `getWorkspaceDir` does not create a workspace directory (a separate function, `ensureWorkspace`, does — see the `pathSafety.js` fix below), and `planState.js` does persist to disk on every write rather than being purely in-memory. Session-derived caches (file index, import/component/DB-schema graphs) deliberately stayed as JSON — they're rebuilt from source code, not a system of record, so Postgres's guarantees don't add anything there.
+- The old 20-fact FIFO cap and exact-match dedup on project memory facts were deliberately dropped, not carried over — the cap only existed to bound a single JSON file's size, a constraint Postgres removes entirely; facts are now kept permanently.
+- Plans and campaigns previously vanished from disk the moment they were applied or rejected (`fs.unlinkSync`). They're now marked with a permanent `resolution` (`applied`/`rejected` for plans; `completed`/`rejected`/`failed` for campaigns) and a timestamp instead of being deleted, so a project's plan history survives — a genuine improvement over the old file-based behavior, not just a like-for-like port.
+- A real bug was found and fixed during the migration itself: the old code let one part of the pipeline mutate a `codeValidationIssues` field directly onto an in-memory plan object after it had already been persisted, relying on JavaScript's object-reference semantics to make the mutation "stick" for the rest of that server session — invisible as a bug until Postgres removed the shared-mutable-reference trick that had been silently papering over it (the field was never actually being saved to disk in the old system either). Fixed by threading `codeValidationIssues` through as a real parameter that gets persisted in the same write, rather than bolted on afterward.
+
+**Deeper `codeValidator.js` coverage.** Reviewing a real generated batch (a set of Sequelize models and their routes) surfaced two further gaps, added as new checks: a model file that exports the Sequelize model directly (`module.exports = sequelize.define(...)`) getting destructured elsewhere (`const { User } = require(...)`) instead of assigned directly, silently binding `undefined`; and a model file requiring a relative database-connection module (`../db`, `../database`, `../sequelize`, `../connection`) that doesn't actually exist yet anywhere the validator can see. The second check is deliberately conservative about what "doesn't exist" means: existence is checked against the real workspace on disk, not just the files in the current batch, specifically so a connection module legitimately created in an earlier batch isn't falsely flagged. `codeValidator.js` now runs 11 checks in total (see Project structure below), all following the same house rule the file states at its own top: deterministic regex/string checks only, and every check traces back to a real bug found by reviewing actual generated diffs, not a hypothetical one.
+
+**Workspace-creation bug in `pathSafety.js`.** A project whose workspace only ever had plan/chat/memory activity — never an actual file write — would throw `ENOENT` the first time a plan was approved, because `isPathSafe` called `getWorkspaceDir` (which only builds a path string) and then immediately ran an unguarded `fs.realpathSync` on a directory that had never actually been created. The very next line in the same function already handled this exact scenario correctly for a path's parent directory; the fix was to call `ensureWorkspace` (which actually creates the directory) at that one call site instead.
+
+**Project-deletion cleanup.** Deleting a project previously only cleared its project-memory facts; conversation history and any plan or campaign state were left behind indefinitely, including a plan that was never resolved at all becoming permanently stuck pending for a project that no longer existed anywhere. Project deletion now also deletes all conversation history (it has no independent value once the project is gone) and resolves any still-open plan or campaign to a new `project_deleted` outcome — already-resolved plan/campaign history is untouched, preserving the permanent record described above.
+
 ## Setup
 
 Prerequisites: Node.js, npm, and Ollama installed.
@@ -150,6 +164,7 @@ Every write, edit, fix, plan, commit, install, and generated test shows a diff o
 - AI self-review is advisory only and never blocks or auto-applies anything.
 - The agent never takes autonomous multi-step actions without a human approval gate at each step.
 - Every student's session, state, files, and conversation history are fully isolated from every other student's — verified live under genuinely concurrent requests, not just sequential ones.
+- Deleting a project deletes its workspace, memory, conversation history, and backups, and resolves any still-open plan or campaign to a permanent `project_deleted` outcome rather than leaving it dangling; already-resolved plan history is left untouched.
 
 ## Project structure
 
@@ -171,20 +186,23 @@ backend/
 - searchReplaceParser.js — parses model output into SEARCH/REPLACE blocks and applies each independently against the real file, reporting per-block success/failure rather than all-or-nothing
 - regressionChecker.js — compares Express route registrations between file versions to catch silently dropped routes or middleware
 - packageJsonChecker.js — catches undeclared require()/import calls and hallucinated npm package versions
+- codeValidator.js — 11 deterministic checks against a completed batch of generated code (ORM mismatch, unimported model usage, model bypass, field-reference mismatch, unresolved model paths, direct factory require, barrel require without destructuring, undefined association targets, frontend/backend response mismatches, destructured plain exports, missing database connection modules); every check traces back to a real bug found by reviewing actual generated diffs
 - moduleSystemDetector.js — deterministic module system detection and mismatch refusal
 - testRunner.js — sandboxed npm test execution
 - gitTool.js — sandboxed git status/diff/commit, risky-path detection
 - packageManagerTool.js — validated npm install execution
-- planState.js — per-session pending-plan and multi-batch campaign state
+- db.js — PostgreSQL connection pool
+- projectResolver.js — resolves a session key to a real Postgres `projects.id`, lazily creating student/project rows
+- planState.js — per-project plan and multi-batch campaign state, persisted to PostgreSQL (`plans`, `plan_campaigns`); resolved plans/campaigns keep a permanent record (`applied`/`rejected`/`completed`/`failed`/`project_deleted`) rather than being deleted
 - toolActionState.js — per-session pending-action gate (git commit, npm install)
 - pendingWriteState.js — per-session pending single-file write/fix/test-generation state, backing refresh recovery
-- conversationHistory.js — per-session, disk-persisted conversation turns
+- conversationHistory.js — per-project conversation history, persisted to PostgreSQL (`conversation_messages`)
 - pathSafety.js — traversal and symlink protection, scoped to each student's own workspace
 - backupManager.js — pre-overwrite backups, scoped per student and project
 - stripCodeFences.js — markdown fence stripping
 - fileTree.js — per-session workspace directory tree
 - extractErrorPath.js — stack trace path extraction
-- projectMemory.js — per-session, disk-persisted fact storage
+- projectMemory.js — per-project fact storage, persisted to PostgreSQL (`project_memory_facts`); facts are kept permanently, no eviction cap
 - various *CommandParser.js files — strict command-trigger parsers
 
 frontend/ — React chat UI, with a project-selector dropdown and a set of dedicated visual panels (write, plan, diffs, blueprint, tool-action) for every pending decision a student needs to review
@@ -193,7 +211,7 @@ workspace/<studentId>/<projectName>/ — the per-student, per-project sandbox fo
 
 ## Status
 
-All six phases complete, including a deliberately rescoped Phase 6 (the original fully-autonomous-project-building vision was ruled out as unrealistic and unsafe for a local-only 1.5B model; the human-supplied-architecture version keeps the same safety guarantees while getting real practical value). Phase 6 has since grown to include a full multi-tenancy conversion (session isolation at every layer: state, filesystem, watchers, backups), a refresh-recovery system, server-stored per-project conversation history, and the UI work to support all of it — turning the tool from something that could only safely serve one person at a time into one that can serve a whole class of students concurrently. Before that, the verification pipeline was hardened: AI self-review was removed in favor of mechanical test-suite verification after proving structurally unreliable in testing, route regression checking and package.json checking were added as additional gates, and edit: was rebuilt on scoped SEARCH/REPLACE patching with per-block partial-application instead of full-file regeneration. Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
+All seven phases complete, including a deliberately rescoped Phase 6 (the original fully-autonomous-project-building vision was ruled out as unrealistic and unsafe for a local-only 1.5B model; the human-supplied-architecture version keeps the same safety guarantees while getting real practical value). Phase 6 has since grown to include a full multi-tenancy conversion (session isolation at every layer: state, filesystem, watchers, backups), a refresh-recovery system, server-stored per-project conversation history, and the UI work to support all of it — turning the tool from something that could only safely serve one person at a time into one that can serve a whole class of students concurrently. Before that, the verification pipeline was hardened: AI self-review was removed in favor of mechanical test-suite verification after proving structurally unreliable in testing, route regression checking and package.json checking were added as additional gates, and edit: was rebuilt on scoped SEARCH/REPLACE patching with per-block partial-application instead of full-file regeneration. Phase 7 moved persistent state (project memory, conversation history, plans and campaigns) from per-session JSON files to PostgreSQL, added two more codeValidator checks found during that work, and fixed a real workspace-creation bug and a project-deletion cleanup gap along the way. Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
 
 ## Known limitations
 
