@@ -1,47 +1,42 @@
-const fs = require("fs");
-const path = require("path");
+const { pool } = require("./db");
+const { getOrCreateProjectId } = require("./projectResolver");
 
-function historyPathFor(sessionKey) {
-  const [studentId, projectName] = sessionKey.split(":");
-  return path.join(__dirname, "memory", `conversationHistory-${studentId}__${projectName}.json`);
+async function loadHistory(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT role, content, action, data FROM conversation_messages WHERE project_id = $1 ORDER BY created_at, id",
+    [projectId]
+  );
+  return rows.map((r) =>
+    r.role === "user"
+      ? { role: r.role, content: r.content }
+      : { role: r.role, action: r.action, data: r.data, content: r.content }
+  );
 }
 
-function loadHistory(sessionKey) {
-  const historyPath = historyPathFor(sessionKey);
-  if (!fs.existsSync(historyPath)) {
-    return [];
-  }
-  try {
-    return JSON.parse(fs.readFileSync(historyPath, "utf-8"));
-  } catch (err) {
-    console.error("[conversationHistory] Failed to parse history file, starting fresh:", err.message);
-    return [];
-  }
+async function appendUserTurn(sessionKey, content) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query(
+    "INSERT INTO conversation_messages (project_id, role, content) VALUES ($1, 'user', $2)",
+    [projectId, content]
+  );
 }
 
-function saveHistory(sessionKey, turns) {
-  const historyPath = historyPathFor(sessionKey);
-  fs.mkdirSync(path.dirname(historyPath), { recursive: true });
-  fs.writeFileSync(historyPath, JSON.stringify(turns, null, 2));
+async function appendAssistantTurn(sessionKey, { action, data, content }) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query(
+    "INSERT INTO conversation_messages (project_id, role, action, data, content) VALUES ($1, 'assistant', $2, $3, $4)",
+    [projectId, action, JSON.stringify(data), content]
+  );
 }
 
-function appendUserTurn(sessionKey, content) {
-  const turns = loadHistory(sessionKey);
-  turns.push({ role: "user", content });
-  saveHistory(sessionKey, turns);
-  return turns;
+// Deletes all conversation history for a project. Called on project
+// deletion -- conversation history has no independent value once the
+// project itself is gone, unlike plans/campaigns which keep a
+// permanent applied/rejected record even after the project is deleted.
+async function clearHistory(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query("DELETE FROM conversation_messages WHERE project_id = $1", [projectId]);
 }
 
-// content here is a plain-text summary for the MODEL's own context window,
-// not for display — the frontend uses `action` + `data` (the raw response
-// payload) with its own shared formatter to render what the student sees.
-// Keeping these two jobs separate avoids the model-facing summary and the
-// human-facing sentence ever needing to match wording.
-function appendAssistantTurn(sessionKey, { action, data, content }) {
-  const turns = loadHistory(sessionKey);
-  turns.push({ role: "assistant", action, data, content });
-  saveHistory(sessionKey, turns);
-  return turns;
-}
-
-module.exports = { loadHistory, appendUserTurn, appendAssistantTurn };
+module.exports = { loadHistory, appendUserTurn, appendAssistantTurn, clearHistory };

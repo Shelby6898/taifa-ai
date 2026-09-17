@@ -1,223 +1,194 @@
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
-const { sanitizeKeyPart } = require("./sanitize");
+const { pool } = require("./db");
+const { getOrCreateProjectId } = require("./projectResolver");
 
-const MAX_PLAN_FILES = 5; // shared cap for how many files a single plan batch may contain
+const MAX_PLAN_FILES = 5;
 
-const plans = new Map(); // sessionKey -> pending plan
-const campaigns = new Map(); // sessionKey -> active campaign
-
-// --- Disk persistence ---
-//
-// plans/campaigns previously lived only in memory, so a server restart
-// silently wiped any in-flight plan or multi-batch campaign, even though
-// the underlying project files, memory indexes, etc. all survive restarts.
-// Each entry is persisted as its own JSON file (matching the pattern used
-// by projectMemory.js / fileIndexer.js) and reloaded on module load.
-
-const PLAN_STATE_DIR = path.join(__dirname, "memory", "planState");
-
-function ensurePlanStateDir() {
-  if (!fs.existsSync(PLAN_STATE_DIR)) {
-    fs.mkdirSync(PLAN_STATE_DIR, { recursive: true });
-  }
-}
-
-function fileKeyFor(sessionKey) {
-  const [studentId, projectName] = sessionKey.split(":");
-  return `${sanitizeKeyPart(studentId)}__${sanitizeKeyPart(projectName)}`;
-}
-
-function planFilePath(sessionKey) {
-  return path.join(PLAN_STATE_DIR, `plan-${fileKeyFor(sessionKey)}.json`);
-}
-
-function campaignFilePath(sessionKey) {
-  return path.join(PLAN_STATE_DIR, `campaign-${fileKeyFor(sessionKey)}.json`);
-}
-
-function persistPlan(sessionKey, plan) {
-  ensurePlanStateDir();
-  fs.writeFileSync(
-    planFilePath(sessionKey),
-    JSON.stringify({ sessionKey, plan }, null, 2)
-  );
-}
-
-function removePersistedPlan(sessionKey) {
-  const fp = planFilePath(sessionKey);
-  if (fs.existsSync(fp)) {
-    fs.unlinkSync(fp);
-  }
-}
-
-function persistCampaign(sessionKey, campaign) {
-  ensurePlanStateDir();
-  fs.writeFileSync(
-    campaignFilePath(sessionKey),
-    JSON.stringify({ sessionKey, campaign }, null, 2)
-  );
-}
-
-function removePersistedCampaign(sessionKey) {
-  const fp = campaignFilePath(sessionKey);
-  if (fs.existsSync(fp)) {
-    fs.unlinkSync(fp);
-  }
-}
-
-function loadPersistedState() {
-  if (!fs.existsSync(PLAN_STATE_DIR)) {
-    return;
-  }
-
-  for (const file of fs.readdirSync(PLAN_STATE_DIR)) {
-    const filePath = path.join(PLAN_STATE_DIR, file);
-
-    try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-
-      if (file.startsWith("plan-") && parsed.sessionKey && parsed.plan) {
-        plans.set(parsed.sessionKey, parsed.plan);
-      } else if (file.startsWith("campaign-") && parsed.sessionKey && parsed.campaign) {
-        campaigns.set(parsed.sessionKey, parsed.campaign);
-      }
-    } catch (err) {
-      console.error(`[planState] Failed to load ${file}:`, err.message);
-    }
-  }
-
-  if (plans.size > 0 || campaigns.size > 0) {
-    console.log(
-      `[planState] Restored ${plans.size} pending plan(s), ${campaigns.size} active campaign(s) from disk`
-    );
-  }
-}
-
-function hasPendingPlan(sessionKey) {
-  return plans.has(sessionKey);
-}
-
-function getPendingPlan(sessionKey) {
-  return plans.get(sessionKey) || null;
-}
-
-function createPlan(sessionKey, { description, files }) {
-  const id = crypto.randomBytes(8).toString("hex");
-
-  const plan = {
-    id,
-    description,
-    files, // [{ path, description }]
-    stage: "plan_proposed"
+async function planRowToObject(row) {
+  if (!row) return null;
+  return {
+    id: row.external_id,
+    description: row.plan_data.description,
+    files: row.plan_data.files,
+    codeValidationIssues: row.plan_data.codeValidationIssues || [],
+    stage: row.stage
   };
-
-  plans.set(sessionKey, plan);
-  persistPlan(sessionKey, plan);
-  return plan;
 }
 
-function enrichWithDiffs(sessionKey, planId, enrichedFiles) {
-  const plan = plans.get(sessionKey);
-  if (!plan || plan.id !== planId) {
+async function hasPendingPlan(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT 1 FROM plans WHERE project_id = $1 AND resolution IS NULL LIMIT 1",
+    [projectId]
+  );
+  return rows.length > 0;
+}
+
+async function getPendingPlan(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plans WHERE project_id = $1 AND resolution IS NULL LIMIT 1",
+    [projectId]
+  );
+  return planRowToObject(rows[0]);
+}
+
+async function createPlan(sessionKey, { description, files }) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const externalId = crypto.randomBytes(8).toString("hex");
+
+  await pool.query(
+    `INSERT INTO plans (external_id, project_id, stage, plan_data)
+     VALUES ($1, $2, 'plan_proposed', $3)`,
+    [externalId, projectId, JSON.stringify({ description, files })]
+  );
+
+  return { id: externalId, description, files, codeValidationIssues: [], stage: "plan_proposed" };
+}
+
+async function enrichWithDiffs(sessionKey, planId, enrichedFiles, codeValidationIssues = []) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plans WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL",
+    [projectId, planId]
+  );
+
+  if (rows.length === 0) {
     return { success: false, reason: "No matching pending plan found" };
   }
 
-  plan.files = enrichedFiles; // [{ path, description, before, after }]
-  plan.stage = "diffs_proposed";
-
-  persistPlan(sessionKey, plan);
-
-  return { success: true, plan };
-}
-
-function clearPlan(sessionKey) {
-  plans.delete(sessionKey);
-  removePersistedPlan(sessionKey);
-}
-
-function isValidPlanId(sessionKey, planId) {
-  const plan = plans.get(sessionKey);
-  return plan !== undefined && plan.id === planId;
-}
-
-// --- Campaign tracking for multi-batch plans ---
-//
-// A campaign stores the actual remaining files (with their descriptions)
-// that didn't fit in the first batch. Continuation batches are pulled
-// mechanically from this list rather than asking the model to re-derive
-// what's left — testing showed the model does not reliably honor a
-// "these files are already done, don't repeat them" instruction, so
-// tracking the real remaining list deterministically is more reliable
-// than trusting the model to reconstruct it from context.
-
-function hasActiveCampaign(sessionKey) {
-  return campaigns.has(sessionKey);
-}
-
-function getActiveCampaign(sessionKey) {
-  return campaigns.get(sessionKey) || null;
-}
-
-function startCampaign(sessionKey, { description, remainingFiles }) {
-  const id = crypto.randomBytes(8).toString("hex");
-
-  const campaign = {
-    id,
-    description,
-    completedFiles: [], // flat list of paths written so far, for record-keeping
-    remainingFiles, // [{ path, description }] not yet batched
-    batchNumber: 1,
-    status: "active"
+  const planData = {
+    ...rows[0].plan_data,
+    files: enrichedFiles,
+    codeValidationIssues
   };
 
-  campaigns.set(sessionKey, campaign);
-  persistCampaign(sessionKey, campaign);
-  return campaign;
+  const { rows: updated } = await pool.query(
+    `UPDATE plans SET stage = 'diffs_proposed', plan_data = $1, updated_at = now()
+     WHERE project_id = $2 AND external_id = $3
+     RETURNING *`,
+    [JSON.stringify(planData), projectId, planId]
+  );
+
+  return { success: true, plan: await planRowToObject(updated[0]) };
 }
 
-function recordBatchCompletion(sessionKey, campaignId, filePaths) {
-  const campaign = campaigns.get(sessionKey);
-  if (!campaign || campaign.id !== campaignId) {
-    return { success: false, reason: "No matching active campaign found" };
-  }
-
-  campaign.completedFiles = campaign.completedFiles.concat(filePaths);
-  campaign.batchNumber += 1;
-
-  persistCampaign(sessionKey, campaign);
-
-  return { success: true, campaign };
+async function clearPlan(sessionKey, resolution = "rejected") {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query(
+    `UPDATE plans SET resolution = $1, resolved_at = now(), updated_at = now()
+     WHERE project_id = $2 AND resolution IS NULL`,
+    [resolution, projectId]
+  );
 }
 
-// Pulls up to maxFiles from the campaign's remaining queue, removing
-// them from it. Returns the batch and how many files are still left
-// after this batch — an empty batch means the campaign is complete.
-function takeNextBatch(sessionKey, campaignId, maxFiles) {
-  const campaign = campaigns.get(sessionKey);
-  if (!campaign || campaign.id !== campaignId) {
-    return { success: false, reason: "No matching active campaign found" };
-  }
+async function isValidPlanId(sessionKey, planId) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT 1 FROM plans WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL LIMIT 1",
+    [projectId, planId]
+  );
+  return rows.length > 0;
+}
 
-  const batch = campaign.remainingFiles.slice(0, maxFiles);
-  campaign.remainingFiles = campaign.remainingFiles.slice(maxFiles);
-
-  persistCampaign(sessionKey, campaign);
-
+function campaignRowToObject(row) {
+  if (!row) return null;
   return {
-    success: true,
-    files: batch,
-    remainingCount: campaign.remainingFiles.length
+    id: row.external_id,
+    description: row.description,
+    completedFiles: row.completed_files,
+    remainingFiles: row.remaining_files,
+    batchNumber: row.batch_number
   };
 }
 
-function clearCampaign(sessionKey) {
-  campaigns.delete(sessionKey);
-  removePersistedCampaign(sessionKey);
+async function hasActiveCampaign(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT 1 FROM plan_campaigns WHERE project_id = $1 AND resolution IS NULL LIMIT 1",
+    [projectId]
+  );
+  return rows.length > 0;
 }
 
-loadPersistedState();
+async function getActiveCampaign(sessionKey) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plan_campaigns WHERE project_id = $1 AND resolution IS NULL LIMIT 1",
+    [projectId]
+  );
+  return campaignRowToObject(rows[0]);
+}
+
+async function startCampaign(sessionKey, { description, remainingFiles }) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const externalId = crypto.randomBytes(8).toString("hex");
+
+  await pool.query(
+    `INSERT INTO plan_campaigns (external_id, project_id, description, batch_number, completed_files, remaining_files)
+     VALUES ($1, $2, $3, 1, '[]', $4)`,
+    [externalId, projectId, description, JSON.stringify(remainingFiles)]
+  );
+
+  return { id: externalId, description, completedFiles: [], remainingFiles, batchNumber: 1 };
+}
+
+async function recordBatchCompletion(sessionKey, campaignId, filePaths) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plan_campaigns WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL",
+    [projectId, campaignId]
+  );
+
+  if (rows.length === 0) {
+    return { success: false, reason: "No matching active campaign found" };
+  }
+
+  const completedFiles = rows[0].completed_files.concat(filePaths);
+  const batchNumber = rows[0].batch_number + 1;
+
+  const { rows: updated } = await pool.query(
+    `UPDATE plan_campaigns SET completed_files = $1, batch_number = $2, updated_at = now()
+     WHERE project_id = $3 AND external_id = $4
+     RETURNING *`,
+    [JSON.stringify(completedFiles), batchNumber, projectId, campaignId]
+  );
+
+  return { success: true, campaign: campaignRowToObject(updated[0]) };
+}
+
+async function takeNextBatch(sessionKey, campaignId, maxFiles) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plan_campaigns WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL",
+    [projectId, campaignId]
+  );
+
+  if (rows.length === 0) {
+    return { success: false, reason: "No matching active campaign found" };
+  }
+
+  const remaining = rows[0].remaining_files;
+  const batch = remaining.slice(0, maxFiles);
+  const newRemaining = remaining.slice(maxFiles);
+
+  await pool.query(
+    `UPDATE plan_campaigns SET remaining_files = $1, updated_at = now()
+     WHERE project_id = $2 AND external_id = $3`,
+    [JSON.stringify(newRemaining), projectId, campaignId]
+  );
+
+  return { success: true, files: batch, remainingCount: newRemaining.length };
+}
+
+async function clearCampaign(sessionKey, resolution = "completed", failureReason = null) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  await pool.query(
+    `UPDATE plan_campaigns SET resolution = $1, failure_reason = $2, resolved_at = now(), updated_at = now()
+     WHERE project_id = $3 AND resolution IS NULL`,
+    [resolution, failureReason, projectId]
+  );
+}
 
 module.exports = {
   hasPendingPlan,

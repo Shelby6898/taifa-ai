@@ -14,6 +14,15 @@ const {
 } = require("./projectMemory");
 
 const {
+  clearHistory
+} = require("./conversationHistory");
+
+const {
+  clearPlan,
+  clearCampaign
+} = require("./planState");
+
+const {
   deleteBackupsForProject
 } = require("./backupManager");
 const { sanitizeKeyPart } = require("./sanitize");
@@ -68,7 +77,7 @@ function deleteProjectMemoryIndexes(sessionKey) {
   return deletedFiles;
 }
 
-function deleteProject(sessionKey) {
+async function deleteProject(sessionKey) {
   const [rawStudentId, rawProjectName] =
     sessionKey.split(":");
 
@@ -114,7 +123,21 @@ function deleteProject(sessionKey) {
   /*
    * 3. Delete persistent project memory.
    */
-  clearMemory(canonicalSessionKey);
+  await clearMemory(canonicalSessionKey);
+
+  /*
+   * 3b. Delete conversation history and resolve any dangling
+   * unresolved plans/campaigns. Conversation history has no
+   * independent value once the project is gone, so it's deleted
+   * outright. Already-resolved plans/campaigns keep their permanent
+   * applied/rejected/completed/failed record per the earlier explicit
+   * decision to preserve that history -- clearPlan/clearCampaign only
+   * touch rows still resolution IS NULL, so this can't overwrite
+   * anything already resolved.
+   */
+  await clearHistory(canonicalSessionKey);
+  await clearPlan(canonicalSessionKey, "project_deleted");
+  await clearCampaign(canonicalSessionKey, "project_deleted");
 
   /*
    * 4. Delete project indexes/history.
