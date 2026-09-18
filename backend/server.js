@@ -44,6 +44,44 @@ const authRoutes = require("./authRoutes");
 const { requireAuth } = require("./authMiddleware");
 const { deleteProject } = require("./projectDeletion");
 
+// Real bug found live: the original version of this only checked
+// workspaceDir/backend/<name>.js directly -- one fixed location. A
+// real generated db.js landed at backend/config/db.js (one directory
+// deeper), so the flat check found nothing there and incorrectly
+// concluded no connection module existed anywhere, even though it
+// genuinely did -- a false positive from checkMissingConnectionModule
+// on its very first real use. Fixed by walking the whole backend/
+// tree recursively instead of guessing a single fixed location.
+function findExistingConnectionModules(workspaceDir, basenames) {
+  const found = new Set();
+  const backendDir = path.join(workspaceDir, "backend");
+  if (!fs.existsSync(backendDir)) return found;
+
+  function walk(dir) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === "node_modules") continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+      } else if (entry.isFile()) {
+        const base = entry.name.replace(/\.[jt]sx?$/i, "");
+        if (basenames.includes(base)) {
+          found.add(base);
+        }
+      }
+    }
+  }
+
+  walk(backendDir);
+  return found;
+}
+
 const app = express();
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
@@ -461,11 +499,7 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
       try {
         const workspaceDir = getWorkspaceDir(sessionKey);
         const { CONNECTION_MODULE_BASENAMES } = require("./codeValidator");
-        for (const name of CONNECTION_MODULE_BASENAMES) {
-          if (fs.existsSync(path.join(workspaceDir, "backend", name + ".js"))) {
-            existingConnectionModules.add(name);
-          }
-        }
+        existingConnectionModules = findExistingConnectionModules(workspaceDir, CONNECTION_MODULE_BASENAMES);
       } catch (err) {
         console.error("codeValidator: could not check for existing connection module:", err.message);
       }
@@ -2135,11 +2169,7 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     try {
       const workspaceDir = getWorkspaceDir(sessionKey);
       const { CONNECTION_MODULE_BASENAMES } = require("./codeValidator");
-      for (const name of CONNECTION_MODULE_BASENAMES) {
-        if (fs.existsSync(path.join(workspaceDir, "backend", name + ".js"))) {
-          existingConnectionModules.add(name);
-        }
-      }
+      existingConnectionModules = findExistingConnectionModules(workspaceDir, CONNECTION_MODULE_BASENAMES);
     } catch (err) {
       console.error("codeValidator: could not check for existing connection module:", err.message);
     }
