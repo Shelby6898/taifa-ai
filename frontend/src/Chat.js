@@ -617,6 +617,18 @@ function Chat({ currentProject }) {
               <div className="diff-file-path">
                 {f.mode === "edit" ? "edit" : "new"}: {f.path}
               </div>
+              {Array.isArray(f.lintCheck) && f.lintCheck.length > 0 && (
+                <div className="panel-note panel-note-warn">
+                  <p>lint check found {f.lintCheck.length} issue(s):</p>
+                  <ul className="plan-validation-issues">
+                    {f.lintCheck.map((issue, j) => (
+                      <li key={j}>
+                        {issue.rule ? <code>{issue.rule}</code> : null}{issue.line ? ` (line ${issue.line})` : ""}: {issue.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="diff-pair">
                 <div className="diff-block">
                   <div className="diff-label">before</div>
