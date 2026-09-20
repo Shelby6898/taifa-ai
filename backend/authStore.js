@@ -20,13 +20,17 @@ function saveUsers(users) {
   fs.writeFileSync(DB_PATH, JSON.stringify(users, null, 2));
 }
 
+// Called only after email verification has already succeeded (the
+// register route checks the code before ever calling this), so a user
+// created here is verified by definition -- there's no unverified
+// state to represent in this store.
 async function create({ username, password }) {
   const users = loadUsers();
   if (users.find((u) => u.username === username)) {
     throw new Error("Username already exists");
   }
   const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-  const user = { _id: crypto.randomUUID(), username, password: hashedPassword };
+  const user = { _id: crypto.randomUUID(), username, password: hashedPassword, verified: true, googleId: null };
   users.push(user);
   saveUsers(users);
   const { password: _omit, ...safeUser } = user;
@@ -38,4 +42,39 @@ async function findOne({ username }) {
   return users.find((u) => u.username === username) || null;
 }
 
-module.exports = { create, findOne };
+async function findOneByGoogleId(googleId) {
+  const users = loadUsers();
+  return users.find((u) => u.googleId === googleId) || null;
+}
+
+// Handles three cases: a returning Google user (found by googleId,
+// returned as-is); a user who previously registered with email/password
+// and is now using Google sign-in for the first time with the same
+// email (found by username match, googleId linked onto the existing
+// record rather than creating a duplicate account); or a genuinely new
+// user (created fresh, no password since Google is the only way in).
+async function linkOrCreateGoogleUser({ googleId, email }) {
+  const users = loadUsers();
+
+  let user = users.find((u) => u.googleId === googleId);
+  if (user) {
+    const { password: _omit, ...safeUser } = user;
+    return safeUser;
+  }
+
+  user = users.find((u) => u.username === email);
+  if (user) {
+    user.googleId = googleId;
+    saveUsers(users);
+    const { password: _omit, ...safeUser } = user;
+    return safeUser;
+  }
+
+  const newUser = { _id: crypto.randomUUID(), username: email, password: null, verified: true, googleId };
+  users.push(newUser);
+  saveUsers(users);
+  const { password: _omit, ...safeUser } = newUser;
+  return safeUser;
+}
+
+module.exports = { create, findOne, findOneByGoogleId, linkOrCreateGoogleUser };
