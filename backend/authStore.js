@@ -77,4 +77,18 @@ async function linkOrCreateGoogleUser({ googleId, email }) {
   return safeUser;
 }
 
-module.exports = { create, findOne, findOneByGoogleId, linkOrCreateGoogleUser };
+// Used only by the reset-password flow, which has already verified
+// the reset token (and thus the user's control of that email) before
+// this is ever called -- no current password is checked here, since
+// proving the token is the whole point of "forgot" password.
+async function updatePassword(username, newPassword) {
+  const users = loadUsers();
+  const user = users.find((u) => u.username === username);
+  if (!user) {
+    throw new Error("No account found for this email");
+  }
+  user.password = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  saveUsers(users);
+}
+
+module.exports = { create, findOne, findOneByGoogleId, linkOrCreateGoogleUser, updatePassword };

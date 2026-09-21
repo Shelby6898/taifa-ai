@@ -38,6 +38,7 @@ function Login({ onLogin }) {
   const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
   const [codeSent, setCodeSent] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
 
   const isLogin = mode === "login";
   const googleButtonRef = useRef(null);
@@ -46,6 +47,31 @@ function Login({ onLogin }) {
     setMode(next);
     setError("");
     setInfo("");
+  };
+
+  const handleForgotSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setInfo("");
+    setLoading(true);
+    try {
+      const response = await fetch("http://localhost:5000/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.error || "Something went wrong");
+        setLoading(false);
+        return;
+      }
+      setInfo("If that email has an account, a reset link is on its way.");
+    } catch (err) {
+      setError("Could not reach the server.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSendCode = async () => {
@@ -192,6 +218,53 @@ function Login({ onLogin }) {
     }
   };
 
+  if (showForgot) {
+    return (
+      <div style={styles.wrap}>
+        <div style={styles.card}>
+          <div style={styles.mark}>
+            <span style={styles.dot} />
+            taifa ai
+          </div>
+          <h2 style={styles.heading}>Reset your password</h2>
+          <p style={styles.sub}>Enter your email and we&rsquo;ll send you a reset link.</p>
+
+          {error && <div style={{ ...styles.msg, ...styles.msgErr }}>{error}</div>}
+          {info && <div style={{ ...styles.msg, ...styles.msgOk }}>{info}</div>}
+
+          <form onSubmit={handleForgotSubmit}>
+            <div style={styles.field}>
+              <label style={styles.label} htmlFor="forgotEmail">Email address</label>
+              <input
+                id="forgotEmail"
+                type="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                style={styles.input}
+                required
+              />
+            </div>
+            <button type="submit" disabled={loading} style={styles.submit}>
+              {loading ? "..." : "Send reset link"}
+            </button>
+          </form>
+
+          <div style={styles.switchLine}>
+            <button
+              onClick={() => { setShowForgot(false); setError(""); setInfo(""); }}
+              style={styles.switchBtn}
+            >
+              Back to log in
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.wrap}>
       <div style={styles.card}>
@@ -298,7 +371,7 @@ function Login({ onLogin }) {
               <button type="button" onClick={() => switchMode("register")} style={styles.hintLink}>
                 Need an account? Sign up
               </button>
-              <button type="button" style={styles.hintLink}>Forgot password?</button>
+              <button type="button" onClick={() => { setShowForgot(true); setError(""); setInfo(""); }} style={styles.hintLink}>Forgot password?</button>
             </div>
           )}
 
@@ -401,19 +474,26 @@ const styles = {
     fontFamily: "var(--font-mono)"
   },
   inputBox: { position: "relative", display: "flex", alignItems: "center" },
-  inputWithToggle: { paddingRight: 42 },
+  inputWithToggle: { paddingRight: 46 },
+  // Tap target spans the input's full height on its right edge, not
+  // just the icon itself -- a small fixed 17x17 hitbox was well under
+  // the ~44px minimum recommended for mobile touch targets, making it
+  // genuinely hard to tap reliably.
   eyeBtn: {
     position: "absolute",
-    right: 4,
+    top: 0,
+    bottom: 0,
+    right: 0,
+    width: 44,
     background: "none",
     border: "none",
     cursor: "pointer",
-    padding: 8,
+    padding: 0,
     color: "var(--text)",
     display: "flex",
-    lineHeight: 0,
-    width: 17,
-    height: 17
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 0
   },
   codeRow: { display: "flex", gap: 8 },
   sendCodeBtn: {

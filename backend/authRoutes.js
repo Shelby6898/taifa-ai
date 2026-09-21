@@ -7,6 +7,7 @@ const { Resend } = require("resend");
 const { OAuth2Client } = require("google-auth-library");
 const User = require("./authStore");
 const { generateCode, verifyCode } = require("./verificationCodes");
+const { generateToken: generateResetToken, verifyToken: verifyResetToken } = require("./resetTokens");
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -134,6 +135,66 @@ router.post("/google", loginLimiter, async (req, res) => {
 // var that has to be kept in sync with this one.
 router.get("/google-client-id", (req, res) => {
   res.json({ clientId: process.env.GOOGLE_CLIENT_ID || null });
+});
+
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many password reset requests. Please try again later." }
+});
+
+// Deliberately responds with the same generic message whether or not
+// the email is actually registered -- confirming or denying an
+// account's existence here would let this endpoint be used to check
+// which emails have accounts, independent of whether the reset itself
+// ever gets used.
+router.post("/forgot-password", forgotPasswordLimiter, async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+
+  try {
+    const user = await User.findOne({ username: email });
+    if (user) {
+      const token = generateResetToken(email);
+      const resetLink = `http://localhost:3000/?resetToken=${token}`;
+      await resend.emails.send({
+        from: "Taifa AI <onboarding@resend.dev>",
+        to: email,
+        subject: "Reset your Taifa AI password",
+        text: `Click the link below to reset your password. This link expires in 30 minutes.\n\n${resetLink}`
+      });
+    }
+    res.json({ message: "If an account exists for this email, a reset link has been sent." });
+  } catch (error) {
+    console.error("Failed to process password reset request:", error.message);
+    res.status(500).json({ error: "Failed to process password reset request" });
+  }
+});
+
+router.post("/reset-password", async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: "Token and new password are required" });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+
+  const tokenResult = verifyResetToken(token);
+  if (!tokenResult.valid) {
+    return res.status(400).json({ error: tokenResult.reason });
+  }
+
+  try {
+    await User.updatePassword(tokenResult.email, newPassword);
+    res.json({ message: "Password reset successfully" });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Failed to reset password" });
+  }
 });
 
 module.exports = router;

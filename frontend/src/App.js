@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import Chat from "./Chat";
 import Login from "./Login";
+import ResetPassword from "./ResetPassword";
 import { getToken, clearToken, authFetch } from "./authFetch";
 
 function App() {
@@ -119,6 +120,14 @@ function App() {
       window.alert("Failed to delete project.");
     }
   };
+
+  // Checked ahead of everything else, including login state -- a
+  // password reset link has to work whether or not the person
+  // clicking it happens to still be logged in on this device.
+  const resetToken = new URLSearchParams(window.location.search).get("resetToken");
+  if (resetToken) {
+    return <ResetPassword token={resetToken} />;
+  }
 
   if (!loggedIn) {
     return <Login onLogin={() => setLoggedIn(true)} />;
