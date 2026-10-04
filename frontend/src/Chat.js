@@ -14,6 +14,7 @@ function Chat({ currentProject }) {
   const [pendingToolAction, setPendingToolAction] = useState(null);
   const [toolActionStatus, setToolActionStatus] = useState("");
   const [planStatus, setPlanStatus] = useState("");
+  const [generatingInfo, setGeneratingInfo] = useState(null);
   const isSendingRef = useRef(false);
 
   useEffect(() => {
@@ -28,6 +29,7 @@ function Chat({ currentProject }) {
     setPendingWrite(null);
     setPendingPlan(null);
     setPendingBlueprint(null);
+    setGeneratingInfo(null);
     setPendingDiffs(null);
     setPendingToolAction(null);
     setWriteStatus("");
@@ -58,6 +60,12 @@ function Chat({ currentProject }) {
         const url = `http://localhost:5000/api/session/current?projectName=${encodeURIComponent(currentProject)}`;
         const response = await authFetch(url);
         const data = await response.json();
+        if (data.action === "clarification_question") {
+          setMessages((prev) => [...prev, { role: "assistant", content: formatAssistantMessage(data) }]);
+          setIsStreaming(false);
+          isSendingRef.current = false;
+          return;
+        }
         if (!data.success || !data.pending) return;
 
         if (data.pending === "toolAction") {
@@ -70,6 +78,8 @@ function Chat({ currentProject }) {
           setPendingWrite(data.data);
         } else if (data.pending === "architectureBlueprint") {
           setPendingBlueprint(data.data);
+        } else if (data.pending === "generating") {
+          setGeneratingInfo(data.data);
         }
         // clarificationQuestion/requirementsSummary/architectureContextCheck no
         // longer need special-case reconstruction here — they're already part
@@ -102,6 +112,8 @@ function Chat({ currentProject }) {
       return `${data.message}\n\n${fileList}`;
     } else if (data.action === "requirements_summary") {
       return `${data.message}\n\n${data.summary}`;
+    } else if (data.action === "clarification_cancelled") {
+      return data.message;
     } else if (data.action === "fact_remembered") {
       return data.alreadyKnown
         ? `Already remembered: "${data.fact}"`
@@ -173,6 +185,12 @@ function Chat({ currentProject }) {
 
       if (contentType.includes("application/json")) {
         const data = await response.json();
+        if (data.action === "clarification_question") {
+          setMessages((prev) => [...prev, { role: "assistant", content: formatAssistantMessage(data) }]);
+          setIsStreaming(false);
+          isSendingRef.current = false;
+          return;
+        }
 
         if (data.action === "propose_write") {
           setPendingWrite(data);
@@ -525,15 +543,22 @@ function Chat({ currentProject }) {
             <div className="blueprint-field"><span className="blueprint-field-label">backend</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.backend}</span></div>
             <div className="blueprint-field"><span className="blueprint-field-label">database</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.database}</span></div>
             <div className="blueprint-field"><span className="blueprint-field-label">authentication</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.authentication}</span></div>
-            <div className="blueprint-field"><span className="blueprint-field-label">storage</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.storage}</span></div>
-            <div className="blueprint-field"><span className="blueprint-field-label">collections</span><span className="blueprint-field-value">{(pendingBlueprint.blueprint.collections || []).join(", ")}</span></div>
-            <div className="blueprint-field"><span className="blueprint-field-label">modules</span><span className="blueprint-field-value">{(pendingBlueprint.blueprint.modules || []).join(", ")}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">database family</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.databaseFamily}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">entities</span><span className="blueprint-field-value">{(pendingBlueprint.blueprint.entities || []).join(", ")}</span></div>
+            <div className="blueprint-field"><span className="blueprint-field-label">deployment</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.deployment || "not specified"}</span></div>
             <div className="blueprint-field"><span className="blueprint-field-label">estimated files</span><span className="blueprint-field-value">{pendingBlueprint.blueprint.estimatedFiles}</span></div>
           </div>
           <p className="panel-hint">{pendingBlueprint.message}</p>
           <div className="panel-actions">
             <button onClick={approveBlueprint} className="btn-approve">looks good</button>
           </div>
+        </div>
+      )}
+
+      {generatingInfo && (
+        <div className="panel panel-generating">
+          <p className="panel-title">{generatingInfo.type === "diffs" ? "generating diffs..." : "generating plan..."}</p>
+          <p className="panel-hint">{generatingInfo.type === "diffs" ? "Still generating code and running checks for the approved plan" : "Still working on: \"" + generatingInfo.description + "\""}. This can take a few minutes on-device -- no need to resend anything, just wait or check back.</p>
         </div>
       )}
 

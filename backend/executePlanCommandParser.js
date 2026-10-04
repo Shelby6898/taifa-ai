@@ -1,4 +1,4 @@
-const TRIGGER_PATTERN = /^execute plan:\s*(.+)$/;
+const TRIGGER_PATTERN = /^execute plan:\s*(.*)$/;
 
 // Parses a multi-line "execute plan:" command. The first line carries
 // the trigger and overall task description; every line after that is
@@ -25,6 +25,15 @@ function parseExecutePlanCommand(message) {
 
   const description = match[1].trim();
   const fileLines = lines.slice(1);
+
+  if (!description) {
+    return { isExecutePlanCommand: true, malformed: true, reason: "No description provided. The first line after \"execute plan:\" must be a one-sentence overall description, then one \"path: description\" line per file." };
+  }
+
+  const looksLikeAFileLine = /^[^\s:]+\.[A-Za-z0-9]+\s*:\s*\S/.test(description);
+  if (looksLikeAFileLine) {
+    return { isExecutePlanCommand: true, malformed: true, reason: "The first line after \"execute plan:\" looks like a file entry (\"" + description + "\"), not an overall description. Put a one-sentence description on the trigger line, then list files one per line after it." };
+  }
 
   if (fileLines.length === 0) {
     return { isExecutePlanCommand: true, malformed: true, reason: "No files listed. Add one line per file after the description, formatted as: path/to/file.js: description" };

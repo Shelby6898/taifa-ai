@@ -1,9 +1,48 @@
+const { getArchitectureTerms } = require("./architectureContract");
 const axios = require("axios");
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
+
 const MODEL_NAME = "qwen2.5-coder-3b-6k";
 
-function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext, siblingFiles }) {
+function buildTerminologyPrompt(architecture) {
+  const terms = getArchitectureTerms(architecture);
+
+  if (!terms) {
+    return "";
+  }
+
+  return `
+DETERMINISTIC ARCHITECTURE TERMINOLOGY — MANDATORY
+
+The architecture contract has already determined the database vocabulary.
+Do not reinterpret, rename, or substitute these terms.
+
+Database: ${terms.database}
+Database family: ${terms.family}
+
+Use these exact concepts:
+- Schema container: ${terms.schemaContainer}
+- Schema containers: ${terms.schemaContainers}
+- Record: ${terms.record}
+- Records: ${terms.records}
+- Field: ${terms.field}
+- Fields: ${terms.fields}
+- Relationship: ${terms.relationship}
+- Relationships: ${terms.relationships}
+- Persistence: ${terms.persistence}
+- Query terminology: ${terms.query}
+- Model terminology: ${terms.model}
+
+These terms are deterministic architecture constraints, not suggestions.
+Do not introduce terminology from another database family.
+
+`;
+}
+
+
+function buildGenerationPrompt({ mode, targetPath, instruction, existingContent, projectContext, siblingFiles, architecture }) {
+  const terminologySection = buildTerminologyPrompt(architecture);
   const siblingSection = siblingFiles && Object.keys(siblingFiles).length > 0
     ? `Real content of other RELATED files in this project, shown for reference ONLY (you MUST match their actual patterns -- ORM/library usage, naming, data access style, etc. Do NOT invent a different pattern, even if it's a common default from your training data, if a sibling file below already establishes one). These files are NOT the file you are writing -- do NOT copy, reproduce, or output any of their content directly. Your output must be the content of "${targetPath}" specifically, which is a different file serving a different purpose than the reference file(s) below:\n\n${Object.entries(siblingFiles).map(([path, content]) => `--- ${path} (REFERENCE ONLY -- do not reproduce this) ---\n${content}`).join("\n\n")}\n\n`
     : "";
@@ -19,7 +58,7 @@ function buildGenerationPrompt({ mode, targetPath, instruction, existingContent,
   if (mode === "edit" && existingContent) {
     return `You are editing an existing code file at path "${targetPath}".
 
-${contextSection}${siblingSection}Current file content:
+${contextSection}${terminologySection}${siblingSection}Current file content:
 ${existingContent}
 
 Instruction: ${instruction}${finalReminder}
@@ -52,16 +91,18 @@ Rules:
 
   return `You are creating a new code file at path "${targetPath}".
 
-${contextSection}${siblingSection}Instruction: ${instruction}${finalReminder}
+${contextSection}${terminologySection}${siblingSection}Instruction: ${instruction}${finalReminder}
 
 Output ONLY the complete file content. Do not include any explanation, introduction, or markdown code fences. Output raw code only, starting from the first line of the file.`;
 }
 
-function buildFixPrompt({ targetPath, errorText, existingContent }) {
+function buildFixPrompt({ targetPath, errorText, existingContent, architecture }) {
   return `You are fixing a bug in an existing code file at path "${targetPath}".
 
 Current file content:
 ${existingContent}
+
+${buildTerminologyPrompt(architecture)}
 
 The following error occurred. Note: this error text may be condensed onto a single line rather than formatted as a multi-line stack trace — read it carefully to identify the actual error type and root cause regardless of formatting:
 
@@ -107,16 +148,28 @@ Write the README in Markdown format, including: a brief project title/descriptio
 Output ONLY the README content in Markdown. Do not wrap it in code fences. Do not include any meta-commentary about this being a generated document.`;
 }
 
-function buildPlanPrompt({ description, fullIndex, completedFiles }) {
+function buildPlanPrompt({ description, fullIndex, completedFiles, blueprint }) {
   const completedSection = completedFiles && completedFiles.length > 0
     ? `\nThis is a continuation of a larger task. The following files have ALREADY been completed in previous batches — do not recreate or re-propose them unless a further change to one of them is genuinely still needed:\n${completedFiles.map((f) => `- ${f}`).join("\n")}\n\nIf the task described below is now fully accomplished by the files already completed, output an empty JSON array: []\n`
+    : "";
+
+  const architectureSection = blueprint
+    ? `
+
+CONFIRMED ARCHITECTURE — BINDING
+The following architecture was explicitly confirmed before planning. Treat these technology choices as binding requirements, not suggestions. Do not substitute another database, framework, authentication method, or architectural choice.
+
+${JSON.stringify(blueprint, null, 2)}
+
+If the architecture contains database terminology, use that terminology consistently in every relevant file description. Do not introduce terminology from a different database family.
+`
     : "";
 
   return `You are planning a multi-file code change for an existing project. You do NOT write any code yet — you only decide which files need to be created or modified.
 
 Existing project files:
 ${fullIndex || "(workspace is currently empty)"}
-${completedSection}
+${completedSection}${architectureSection}
 The user's request, including any answers they gave to clarifying questions (these are binding requirements — do not substitute your own preference for anything the user explicitly specified, such as a database or technology choice):\n${description}
 
 Produce a plan as a JSON array. Each item must have exactly two fields:
@@ -341,7 +394,7 @@ async function generateSelfReview(code, verificationContext = {}) {
   return response.data.response;
 }
 
-function buildTestGenerationPrompt({ sourceFilePath, sourceFileContent, testFilePath, existingTestContent, moduleSystem }) {
+function buildTestGenerationPrompt({ sourceFilePath, sourceFileContent, testFilePath, existingTestContent, moduleSystem, architecture }) {
   const editSection = existingTestContent
     ? `There is already a test file at ${testFilePath} with this content, which you should update rather than replace with something unrelated:
 ${existingTestContent}
@@ -359,6 +412,8 @@ ${moduleSystemInstruction}
 
 The file being tested is at ${sourceFilePath}. Its ACTUAL current content is:
 ${sourceFileContent}
+
+${buildTerminologyPrompt(architecture)}
 
 ${editSection}Requirements:
 - Import the actual exported function(s) from "${sourceFilePath}" using the correct relative path and the SAME export style already used in that file (named export vs default export — look at the actual code above, do not guess).
@@ -448,6 +503,16 @@ async function generateTargetedAddition(params) {
 
 function buildBlueprintPrompt(description) {
   return `Based on the following project requirements, produce a concise architecture blueprint.
+
+IMPORTANT — entities are business/domain concepts, not database vocabulary.
+The "entities" field must contain domain entities such as users, properties,
+orders, payments, applications, or appointments.
+
+Do NOT use database-specific terminology such as "tables", "rows",
+"collections", or "documents" as the entity representation.
+The deterministic architecture contract will derive database terminology
+from the selected database technology.
+
 
 Requirements:
 ${description}

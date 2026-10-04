@@ -1,4 +1,8 @@
-require("dotenv").config();
+const {
+  normalizeArchitecture,
+  getArchitectureTerms
+} = require("./architectureContract");
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -29,6 +33,7 @@ const { parseInstallCommand } = require("./installCommandParser");
 const { isGitRepo, getStatus, getDiff, commitChanges, detectRiskyPaths } = require("./gitTool");
 const { installPackage } = require("./packageManagerTool");
 const { hasPendingAction, getPendingAction, createPendingAction, isValidActionId, clearPendingAction } = require("./toolActionState");
+const { startGenerating, isGenerating, getGenerating, stopGenerating } = require("./generationState");
 const { hasPendingWrite, getPendingWrite, createPendingWrite, clearPendingWrite } = require("./pendingWriteState");
 const { loadHistory, appendUserTurn, appendAssistantTurn } = require("./conversationHistory");
 const { runTests } = require("./testRunner");
@@ -37,7 +42,36 @@ const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
 const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
 const { checkVocabularyConsistency, checkExcludedScope, checkMissingRequiredScope } = require("./planValidator");
+const { assertGeneratedContentMatchesArchitecture } = require("./architectureContentValidator");
 const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
+function validateArchitectureContentOrThrow(sessionKey, content, targetPath) {
+  const architecture = getBlueprint(sessionKey);
+
+  // Architecture validation is active only after the user has
+  // confirmed a blueprint.
+  if (!architecture) {
+    return;
+  }
+
+  try {
+    assertGeneratedContentMatchesArchitecture(
+      content,
+      architecture
+    );
+  } catch (err) {
+    if (err.code === "ARCHITECTURE_DRIFT") {
+      err.targetPath = targetPath;
+
+      console.error(
+        `[architectureContentValidator] Rejected generated content for ${targetPath}:`,
+        err.message
+      );
+    }
+
+    throw err;
+  }
+}
+
 const { FIXED_PLANNING_QUESTIONS, SHORT_PLANNING_QUESTIONS } = require("./planningQuestions");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
@@ -128,6 +162,17 @@ function annotateStorageFiles(fileList, blueprint) {
   });
 }
 
+// Replaces any previously-appended section under the given marker with a
+// new one, instead of stacking indefinitely. Each correction/revision the
+// user sends should supersede the last one of the same kind, not pile on
+// top of it -- unbounded accumulation drowns the model in every past
+// (often superseded) complaint, which empirically made it LESS likely to
+// satisfy the latest one, not more.
+function replaceLastSection(description, marker, newText) {
+  const markerIndex = description.indexOf(marker);
+  const base = markerIndex === -1 ? description : description.slice(0, markerIndex);
+  return base.replace(/\n+$/, "") + "\n\n" + marker + newText;
+}
 // The model occasionally echoes the field labels it was given back into
 // the content itself, producing "Path: <path>\nDescription: <real text>"
 // instead of just the real text. Strips that redundant echo when present,
@@ -140,12 +185,33 @@ function cleanDescription(description) {
 
 async function generateBatchPlan({ description, completedFiles, blueprint }, sessionKey) {
   const fullIndex = formatFullIndex(sessionKey, description);
-  const rawPlan = await generatePlan({ description, fullIndex, completedFiles });
+  const rawPlan = await generatePlan({ description, fullIndex, completedFiles, blueprint });
+  console.log("\n========== RAW PLAN OUTPUT ==========");
+  console.log(rawPlan);
+  console.log("========== END RAW PLAN OUTPUT ==========\n");
   const cleanedPlan = stripCodeFences(rawPlan);
-  const parsedFiles = lenientJsonParse(cleanedPlan);
+  console.log("\n========== CLEANED PLAN ==========");
+  console.log(cleanedPlan);
+  console.log("========== END CLEANED PLAN ==========\n");
+  const parsedPlan = lenientJsonParse(cleanedPlan);
+  console.log("\n========== PARSED PLAN ==========");
+  console.log(JSON.stringify(parsedPlan, null, 2));
+  console.log("========== END PARSED PLAN ==========\n");
 
-  if (!Array.isArray(parsedFiles)) {
-    throw new Error("Generated plan was not a JSON array");
+  let parsedFiles;
+
+  if (Array.isArray(parsedPlan)) {
+    parsedFiles = parsedPlan;
+  } else if (
+    parsedPlan &&
+    typeof parsedPlan === "object" &&
+    Array.isArray(parsedPlan.files)
+  ) {
+    parsedFiles = parsedPlan.files;
+  } else {
+    throw new Error(
+      "Generated plan must be either a JSON array or an object containing a files array"
+    );
   }
 
   const seenPaths = new Set();
@@ -372,8 +438,15 @@ async function handleWriteCommand(parsedCommand, res, sessionKey) {
         instruction,
         projectContext,
         siblingFiles,
+        architecture: getBlueprint(sessionKey),
         existingContent: fileExists ? existingContent : null
       });
+
+      validateArchitectureContentOrThrow(
+        sessionKey,
+        cleanedContent,
+        targetPath
+      );
 
       const { checkSyntax } = require("./syntaxChecker");
       const syntaxResult = checkSyntax(cleanedContent);
@@ -637,10 +710,18 @@ async function handleWriteTestsCommand(targetPath, res, sessionKey) {
       sourceFileContent: sourceContent,
       testFilePath,
       existingTestContent: testFileExists ? existingTestContent : null,
-      moduleSystem: requiredModuleSystem
+      moduleSystem: requiredModuleSystem,
+      architecture: getBlueprint(sessionKey)
     });
 
     const cleanedContent = stripCodeFences(rawGenerated);
+    validateArchitectureContentOrThrow(
+      sessionKey,
+      cleanedContent,
+      testFilePath
+    );
+
+
 
     const moduleMismatch = detectModuleSystemMismatch(cleanedContent, requiredModuleSystem);
 
@@ -676,6 +757,7 @@ async function handleWriteTestsCommand(targetPath, res, sessionKey) {
     // run it, to check that the newly generated test itself passes
     // against the real, unchanged source file it's meant to test.
     const fsSync = require("fs");
+
     fsSync.writeFileSync(testSafetyCheck.resolvedPath, cleanedContent, "utf-8");
     const testCheck = runGeneratedTestFile(testSafetyCheck.resolvedPath);
 
@@ -800,8 +882,14 @@ async function handleFixCommand(fixCommand, res, sessionKey) {
     const { content: cleanedContent, patchWarnings } = await generateFix({
       targetPath: relativePath,
       errorText,
-      existingContent
+      existingContent,
+      architecture: getBlueprint(sessionKey)
     });
+      validateArchitectureContentOrThrow(
+        sessionKey,
+        cleanedContent,
+        relativePath
+      );
 
     const { checkSyntax } = require("./syntaxChecker");
     const syntaxResult = checkSyntax(cleanedContent);
@@ -946,6 +1034,11 @@ async function handleDocumentCommand(res, sessionKey) {
   try {
     const rawGenerated = await generateDocumentation({ fullIndex });
     const cleanedContent = stripCodeFences(rawGenerated);
+    validateArchitectureContentOrThrow(
+      sessionKey,
+      cleanedContent,
+      targetPath
+    );
 
     createPendingWrite(sessionKey, {
       mode: fileExists ? "edit" : "write",
@@ -1187,6 +1280,7 @@ app.post("/api/tool-action/reject", requireAuth, (req, res) => {
 });
 
 async function handlePlanCommand(planCommand, res, sessionKey) {
+  console.log("[plan] handlePlanCommand entered:", JSON.stringify(planCommand));
   if (planCommand.malformed) {
     return res.status(400).json({
       success: false,
@@ -1224,6 +1318,7 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
   const questions = hasMemory ? SHORT_PLANNING_QUESTIONS : FIXED_PLANNING_QUESTIONS;
   const memoryContext = hasMemory ? memoryBlock : null;
 
+  console.log("[plan] starting clarification:", JSON.stringify({ hasMemory, questionCount: questions.length }));
   startClarification(sessionKey, { description: planCommand.description, questions, memoryContext });
 
   return res.json({
@@ -1244,6 +1339,7 @@ async function handlePlanCommand(planCommand, res, sessionKey) {
 // clarification step can wrap around this without duplicating the
 // actual plan-generation logic.
 async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
+  startGenerating(sessionKey, description);
   try {
     const MAX_PLANNING_ROUNDS = 6; // safety ceiling: rounds of generateBatchPlan calls, not files
     const estimatedFiles = (blueprint && blueprint.estimatedFiles) || null;
@@ -1430,6 +1526,8 @@ async function generateAndReturnPlan(description, res, blueprint, sessionKey) {
       action: "generation_failed",
       reason: err.message
     });
+  } finally {
+    stopGenerating(sessionKey);
   }
 }
 
@@ -1505,6 +1603,7 @@ async function handleExecutePlanCommand(executePlanCommand, res, sessionKey) {
 }
 
 app.post("/api/chat", requireAuth, async (req, res) => {
+  console.log("[chat] /api/chat request received:", JSON.stringify({ prompt: req.body.prompt, projectName: req.body.projectName }));
   const { prompt, history, projectName } = req.body;
   const sessionKey = getSessionKey(req);
 
@@ -1566,7 +1665,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
     if (phase === "summary") {
       if (!isConfirmation) {
-        const revisedDescription = getEnrichedDescription(sessionKey) + "\n\nRevision from the user:\n" + trimmedPrompt;
+        const revisedDescription = replaceLastSection(getEnrichedDescription(sessionKey), "Revision from the user:\n", trimmedPrompt);
         setEnrichedDescription(sessionKey, revisedDescription);
         return res.json({
           success: true,
@@ -1583,7 +1682,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         try {
           const rawBlueprint = await generateBlueprint(enrichedDescription);
           const cleanedBlueprint = stripCodeFences(rawBlueprint);
-          const blueprint = lenientJsonParse(cleanedBlueprint);
+          const rawBlueprintObject = lenientJsonParse(cleanedBlueprint);
+          const blueprint = normalizeArchitecture(rawBlueprintObject);
           beginBlueprintConfirmation(sessionKey, { blueprint });
           return res.json({
             success: true,
@@ -1617,7 +1717,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       try {
         const rawBlueprint = await generateBlueprint(finalDescription);
         const cleanedBlueprint = stripCodeFences(rawBlueprint);
-        const blueprint = lenientJsonParse(cleanedBlueprint);
+        const rawBlueprintObject = lenientJsonParse(cleanedBlueprint);
+        const blueprint = normalizeArchitecture(rawBlueprintObject);
         beginBlueprintConfirmation(sessionKey, { blueprint });
         return res.json({
           success: true,
@@ -1633,13 +1734,14 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     }
     if (phase === "blueprint") {
       if (!isConfirmation) {
-        const correctedDescription = getEnrichedDescription(sessionKey) + "\n\nCorrection from the user about the architecture:\n" + trimmedPrompt;
+        const correctedDescription = replaceLastSection(getEnrichedDescription(sessionKey), "Correction from the user about the architecture:\n", trimmedPrompt);
         setEnrichedDescription(sessionKey, correctedDescription);
 
         try {
           const rawBlueprint = await generateBlueprint(correctedDescription);
           const cleanedBlueprint = stripCodeFences(rawBlueprint);
-          const blueprint = lenientJsonParse(cleanedBlueprint);
+          const rawBlueprintObject = lenientJsonParse(cleanedBlueprint);
+          const blueprint = normalizeArchitecture(rawBlueprintObject);
           beginBlueprintConfirmation(sessionKey, { blueprint });
           return res.json({
             success: true,
@@ -1938,6 +2040,12 @@ app.post("/api/write", requireAuth, (req, res) => {
     const backupPath = backupExistingFile(sessionKey, safetyCheck.resolvedPath, targetPath);
 
     fs.mkdirSync(path.dirname(safetyCheck.resolvedPath), { recursive: true });
+    validateArchitectureContentOrThrow(
+      sessionKey,
+      content,
+      targetPath
+    );
+
     fs.writeFileSync(safetyCheck.resolvedPath, content, "utf-8");
 
     console.log(`[api/write] Wrote ${content.length} bytes to ${targetPath}`);
@@ -2036,6 +2144,8 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     });
   }
 
+  startGenerating(sessionKey, plan.description, "diffs");
+
   try {
     const enrichedFiles = [];
 
@@ -2090,7 +2200,8 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
         targetPath: file.path,
         instruction: file.description,
         projectContext: plan.description,
-      siblingFiles,
+        siblingFiles,
+        architecture: getBlueprint(sessionKey),
         existingContent: fileExists ? existingContent : null
       });
 
@@ -2174,11 +2285,8 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
       console.error("codeValidator: could not check for existing connection module:", err.message);
     }
 
-    console.log("[codeValidator debug] workspaceDir models check -- alreadyAppliedModelFiles.length:", alreadyAppliedModelFiles.length, alreadyAppliedModelFiles.map(f => f.path));
-    console.log("[codeValidator debug] batchBlueprint:", JSON.stringify(batchBlueprint));
     const codeValidationIssues = validateGeneratedCode([...enrichedFiles, ...alreadyAppliedModelFiles], batchBlueprint, existingConnectionModules)
       .filter((issue) => enrichedFiles.some((ef) => ef.path === issue.path));
-    console.log("[codeValidator debug] issues found:", codeValidationIssues.length, JSON.stringify(codeValidationIssues));
 
     const enrichResult = await enrichWithDiffs(sessionKey, planId, enrichedFiles, codeValidationIssues);
 
@@ -2196,6 +2304,8 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Plan approval failed:", err.message);
     return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    stopGenerating(sessionKey);
   }
 });
 
@@ -2252,6 +2362,12 @@ app.post("/api/plan/apply", requireAuth, async (req, res) => {
     try {
       const backupPath = backupExistingFile(sessionKey, safetyCheck.resolvedPath, file.path);
       fs.mkdirSync(path.dirname(safetyCheck.resolvedPath), { recursive: true });
+      validateArchitectureContentOrThrow(
+        sessionKey,
+        file.after,
+        file.path
+      );
+
       fs.writeFileSync(safetyCheck.resolvedPath, file.after, "utf-8");
 
       console.log("[api/plan/apply] Wrote " + file.after.length + " bytes to " + file.path);
@@ -2450,6 +2566,10 @@ app.get("/api/files", requireAuth, (req, res) => {
 app.get("/api/session/current", requireAuth, async (req, res) => {
   try {
     const sessionKey = getSessionKey(req);
+
+    if (isGenerating(sessionKey)) {
+      return res.json({ success: true, pending: "generating", data: getGenerating(sessionKey) });
+    }
 
     if (hasPendingAction(sessionKey)) {
       return res.json({ success: true, pending: "toolAction", data: getPendingAction(sessionKey) });

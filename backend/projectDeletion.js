@@ -26,6 +26,7 @@ const {
   deleteBackupsForProject
 } = require("./backupManager");
 const { sanitizeKeyPart } = require("./sanitize");
+const { renameDeletedProject } = require("./projectResolver");
 
 const MEMORY_DIR = path.join(
   __dirname,
@@ -140,6 +141,14 @@ async function deleteProject(sessionKey) {
   await clearCampaign(canonicalSessionKey, "project_deleted");
 
   /*
+   * 3c. Rename the deleted project's row (see projectResolver.js --
+   * renameDeletedProject) so its permanently-resolved plan/campaign
+   * history survives, while freeing up the original name for a future
+   * project of the same name to not silently inherit this one's id.
+   */
+  const renameResult = await renameDeletedProject(canonicalSessionKey);
+
+  /*
    * 4. Delete project indexes/history.
    */
   const deletedMemoryFiles =
@@ -191,6 +200,10 @@ async function deleteProject(sessionKey) {
 
     backupsDeleted:
       backupResult.deleted,
+
+    projectRenamed: renameResult.renamed,
+
+    renamedTo: renameResult.deletedName,
 
     message:
       `Project "${projectName}" deleted successfully`

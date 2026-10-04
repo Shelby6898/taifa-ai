@@ -70,14 +70,33 @@ function checkExcludedScope(files, requirementsText) {
 // actually been covered.
 // Scoped deliberately to only what we've seen actually fail live —
 // Android was omitted from a real plan despite being explicitly required.
-// Not adding an iOS rule yet: the ticketing requirements say "iOS can be
-// added in a later release," a deferral, not a requirement — a naive
-// keyword match would have false-flagged a correctly-scoped plan. Add iOS
-// (or other platforms) only once we have a real evidenced case and a
-// pattern for distinguishing "required now" from "deferred."
+// Each mention of the trigger phrase is checked for nearby deferral
+// language (e.g. "Android comes later") within DEFERRAL_WINDOW characters;
+// a mention is only treated as a real requirement if at least one
+// occurrence has no such deferral language nearby. This lets deferral
+// statements like "iOS can be added in a later release" pass through
+// without a false positive, while still catching genuine same-release
+// requirements.
+const DEFERRAL_WINDOW = 60;
+const DEFERRAL_PATTERN = /\b(later|come later|future release|future phase|next release|next phase|phase 2|v2|subsequent release|added later|not (?:in|for|part of) (?:the )?(?:first|initial|mvp|v1)|afterward|down the line)\b/i;
+
 const REQUIRED_PATTERNS = [
-  { phrase: /android/i, area: "Android", keyword: /android|kotlin/i },
+  { phrase: /android/gi, area: "Android", keyword: /android|kotlin/i },
 ];
+
+function hasNonDeferredMatch(text, phrase) {
+  const re = new RegExp(phrase.source, phrase.flags.includes("g") ? phrase.flags : phrase.flags + "g");
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const start = Math.max(0, match.index - DEFERRAL_WINDOW);
+    const end = Math.min(text.length, match.index + match[0].length + DEFERRAL_WINDOW);
+    const context = text.slice(start, end);
+    if (!DEFERRAL_PATTERN.test(context)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function checkMissingRequiredScope(files, requirementsText) {
   const issues = [];
@@ -86,7 +105,7 @@ function checkMissingRequiredScope(files, requirementsText) {
   const text = requirementsText.toLowerCase();
 
   for (const rule of REQUIRED_PATTERNS) {
-    if (rule.phrase.test(text)) {
+    if (hasNonDeferredMatch(text, rule.phrase)) {
       const covered = files.some((f) =>
         rule.keyword.test(f.path) || rule.keyword.test(f.description || "")
       );
