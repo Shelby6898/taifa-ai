@@ -73,6 +73,53 @@ async function enrichWithDiffs(sessionKey, planId, enrichedFiles, codeValidation
   return { success: true, plan: await planRowToObject(updated[0]) };
 }
 
+// Replaces one file's entry within an already-diffed pending plan, used
+// by the fix-agent flow: a single flagged file gets regenerated and
+// re-checked, and only its entry in plan_data.files is swapped in-place,
+// preserving the all-or-nothing batch semantics for the rest of the plan.
+// Also drops any codeValidationIssues for that path, since they're stale
+// the moment the file content changes -- the caller is expected to pass
+// in fresh ones from re-running the checks against the new content.
+async function updateFileInPlan(sessionKey, planId, filePath, updatedFile, freshIssuesForPath = []) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plans WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL",
+    [projectId, planId]
+  );
+
+  if (rows.length === 0) {
+    return { success: false, reason: "No matching pending plan found" };
+  }
+
+  const existingData = rows[0].plan_data;
+  const fileIndex = (existingData.files || []).findIndex((f) => f.path === filePath);
+
+  if (fileIndex === -1) {
+    return { success: false, reason: `File "${filePath}" is not part of this plan's batch` };
+  }
+
+  const updatedFiles = [...existingData.files];
+  updatedFiles[fileIndex] = updatedFile;
+
+  const otherIssues = (existingData.codeValidationIssues || []).filter((i) => i.path !== filePath);
+  const updatedIssues = [...otherIssues, ...freshIssuesForPath];
+
+  const planData = {
+    ...existingData,
+    files: updatedFiles,
+    codeValidationIssues: updatedIssues
+  };
+
+  const { rows: updated } = await pool.query(
+    `UPDATE plans SET plan_data = $1, updated_at = now()
+     WHERE project_id = $2 AND external_id = $3
+     RETURNING *`,
+    [JSON.stringify(planData), projectId, planId]
+  );
+
+  return { success: true, plan: await planRowToObject(updated[0]) };
+}
+
 async function clearPlan(sessionKey, resolution = "rejected") {
   const projectId = await getOrCreateProjectId(sessionKey);
   await pool.query(
@@ -195,6 +242,7 @@ module.exports = {
   getPendingPlan,
   createPlan,
   enrichWithDiffs,
+  updateFileInPlan,
   clearPlan,
   isValidPlanId,
   hasActiveCampaign,

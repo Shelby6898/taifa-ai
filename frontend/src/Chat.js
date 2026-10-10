@@ -15,6 +15,7 @@ function Chat({ currentProject }) {
   const [toolActionStatus, setToolActionStatus] = useState("");
   const [planStatus, setPlanStatus] = useState("");
   const [generatingInfo, setGeneratingInfo] = useState(null);
+  const [fixingPath, setFixingPath] = useState(null);
   const isSendingRef = useRef(false);
 
   useEffect(() => {
@@ -437,6 +438,37 @@ function Chat({ currentProject }) {
     }
   };
 
+
+  const fixFile = async (filePath) => {
+    if (!pendingDiffs) return;
+    setFixingPath(filePath);
+
+    try {
+      const response = await authFetch("http://localhost:5000/api/plan/fix-file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: pendingDiffs.planId, path: filePath, projectName: currentProject })
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        setPendingDiffs((prev) => {
+          if (!prev) return prev;
+          const updatedFiles = prev.files.map((f) => (f.path === filePath ? result.file : f));
+          const otherIssues = (prev.codeValidationIssues || []).filter((i) => i.path !== filePath);
+          const updatedIssues = [...otherIssues, ...(result.codeValidationIssues || [])];
+          return { ...prev, files: updatedFiles, codeValidationIssues: updatedIssues };
+        });
+      } else {
+        setPlanStatus(`Fix failed for ${filePath}: ${result.reason || result.error || "Unknown error"}`);
+      }
+    } catch (err) {
+      setPlanStatus(`Fix failed for ${filePath}: ${err.message}`);
+    } finally {
+      setFixingPath(null);
+    }
+  };
   const rejectDiffs = async () => {
     if (!pendingDiffs) return;
 
@@ -653,6 +685,15 @@ function Chat({ currentProject }) {
                     ))}
                   </ul>
                 </div>
+              )}
+              {((Array.isArray(f.lintCheck) && f.lintCheck.length > 0) || (pendingDiffs.codeValidationIssues || []).some((iss) => iss.path === f.path)) && (
+                <button
+                  onClick={() => fixFile(f.path)}
+                  disabled={fixingPath === f.path}
+                  className="btn-fix"
+                >
+                  {fixingPath === f.path ? "fixing..." : "fix with AI"}
+                </button>
               )}
               <div className="diff-pair">
                 <div className="diff-block">

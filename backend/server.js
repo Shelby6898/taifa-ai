@@ -40,7 +40,7 @@ const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
-const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
+const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, updateFileInPlan, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
 const { checkVocabularyConsistency, checkExcludedScope, checkMissingRequiredScope } = require("./planValidator");
 const { assertGeneratedContentMatchesArchitecture } = require("./architectureContentValidator");
 const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
@@ -2303,6 +2303,154 @@ app.post("/api/plan/approve", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Plan approval failed:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    stopGenerating(sessionKey);
+  }
+});
+
+// Regenerates one file's content within an already-diffed pending plan,
+// using its own lint/codeValidator findings as the explicit problem to
+// solve (not a vague instruction) -- the mechanical checks already know
+// exactly what's wrong, so the model doesn't have to guess. Re-runs the
+// full check suite against the new content and swaps it into the plan's
+// batch in place via updateFileInPlan, preserving all-or-nothing
+// semantics for the rest of the batch. Never auto-applies -- the human
+// still reviews the new diff like any other.
+app.post("/api/plan/fix-file", requireAuth, async (req, res) => {
+  const sessionKey = getSessionKey(req);
+  const { planId, path: filePath } = req.body;
+
+  if (!await isValidPlanId(sessionKey, planId)) {
+    return res.status(400).json({ success: false, reason: "No matching pending plan to fix a file in." });
+  }
+
+  const plan = await getPendingPlan(sessionKey);
+
+  if (plan.stage !== "diffs_proposed") {
+    return res.status(400).json({
+      success: false,
+      reason: "Plan diffs have not been generated yet. Current stage: " + plan.stage
+    });
+  }
+
+  const fileEntry = plan.files.find((f) => f.path === filePath);
+  if (!fileEntry) {
+    return res.status(400).json({ success: false, reason: `File "${filePath}" is not part of this plan's batch.` });
+  }
+
+  const pathIssues = (plan.codeValidationIssues || []).filter((i) => i.path === filePath);
+  const lintIssues = (Array.isArray(fileEntry.lintCheck) ? fileEntry.lintCheck : []) || [];
+
+  if (pathIssues.length === 0 && lintIssues.length === 0) {
+    return res.status(400).json({ success: false, reason: `No known issues recorded for "${filePath}" to fix.` });
+  }
+
+  const issueLines = [
+    ...pathIssues.map((i) => `- [${i.type}] ${i.detail}`),
+    ...lintIssues.map((i) => `- [lint: ${i.rule || "issue"}] line ${i.line}: ${i.message}`)
+  ];
+  const errorText = `The following mechanical checks found real problems in this file, which must all be fixed:\n\n${issueLines.join("\n")}`;
+
+  const safetyCheck = isPathSafe(sessionKey, filePath);
+  if (!safetyCheck.safe) {
+    return res.status(400).json({ success: false, reason: "Path safety check failed for " + filePath + ": " + safetyCheck.reason });
+  }
+
+  startGenerating(sessionKey, `Fixing ${filePath}`, "diffs");
+
+  try {
+    const { content: cleanedContent, patchWarnings } = await generateFix({
+      targetPath: filePath,
+      errorText,
+      existingContent: fileEntry.after,
+      architecture: getBlueprint(sessionKey)
+    });
+
+    validateArchitectureContentOrThrow(sessionKey, cleanedContent, filePath);
+
+    const { checkSyntax } = require("./syntaxChecker");
+    const syntaxResult = checkSyntax(cleanedContent);
+    const { checkImports } = require("./importChecker");
+    const importResult = checkImports(sessionKey, cleanedContent, safetyCheck.resolvedPath);
+    const { checkLint } = require("./lintChecker");
+    const lintResult = checkLint(cleanedContent);
+    const { detectRouteRegressions } = require("./regressionChecker");
+    const regressionWarnings = detectRouteRegressions(fileEntry.after, cleanedContent);
+    const { checkUndeclaredDependencies } = require("./packageJsonChecker");
+    const undeclaredDependencies = checkUndeclaredDependencies(safetyCheck.resolvedPath, cleanedContent);
+
+    const updatedFile = {
+      ...fileEntry,
+      after: cleanedContent,
+      patchWarnings,
+      syntaxCheck: syntaxResult,
+      importCheck: importResult,
+      lintCheck: lintResult,
+      regressionWarnings,
+      undeclaredDependencies
+    };
+
+    const otherFiles = plan.files.filter((f) => f.path !== filePath);
+
+    let alreadyAppliedModelFiles = [];
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const modelsDir = path.join(workspaceDir, "backend", "models");
+      if (fs.existsSync(modelsDir)) {
+        const modelFilenames = fs.readdirSync(modelsDir).filter((f) => /\.[jt]sx?$/i.test(f));
+        alreadyAppliedModelFiles = modelFilenames
+          .filter((f) => !plan.files.some((pf) => pf.path.endsWith("models/" + f)))
+          .map((f) => ({
+            path: "backend/models/" + f,
+            after: fs.readFileSync(path.join(modelsDir, f), "utf-8")
+          }));
+      }
+    } catch (err) {
+      console.error("fix-file codeValidator: could not read already-applied model files:", err.message);
+    }
+
+    let batchBlueprint = null;
+    const blueprintMatch = plan.description.match(/Agreed architecture \(technology choices below are binding, not suggestions\):\s*(\{[\s\S]*\})/);
+    if (blueprintMatch) {
+      try {
+        batchBlueprint = lenientJsonParse(blueprintMatch[1]);
+      } catch (err) {
+        console.error("fix-file codeValidator: could not parse blueprint from plan description:", err.message);
+      }
+    }
+
+    let existingConnectionModules = new Set();
+    try {
+      const workspaceDir = getWorkspaceDir(sessionKey);
+      const { CONNECTION_MODULE_BASENAMES } = require("./codeValidator");
+      existingConnectionModules = findExistingConnectionModules(workspaceDir, CONNECTION_MODULE_BASENAMES);
+    } catch (err) {
+      console.error("fix-file codeValidator: could not check for existing connection module:", err.message);
+    }
+
+    const { validateGeneratedCode } = require("./codeValidator");
+    const allFilesForValidation = [...otherFiles, updatedFile, ...alreadyAppliedModelFiles];
+    const freshCodeValidationIssues = validateGeneratedCode(allFilesForValidation, batchBlueprint, existingConnectionModules)
+      .filter((issue) => issue.path === filePath);
+
+    const updateResult = await updateFileInPlan(sessionKey, planId, filePath, updatedFile, freshCodeValidationIssues);
+
+    if (!updateResult.success) {
+      return res.status(400).json({ success: false, reason: updateResult.reason });
+    }
+
+    return res.json({
+      success: true,
+      action: "file_fixed",
+      planId,
+      path: filePath,
+      file: updatedFile,
+      codeValidationIssues: freshCodeValidationIssues,
+      remainingIssueCount: freshCodeValidationIssues.length + lintResult.length
+    });
+  } catch (err) {
+    console.error("Fix-file failed:", err.message);
     return res.status(500).json({ success: false, error: err.message });
   } finally {
     stopGenerating(sessionKey);
