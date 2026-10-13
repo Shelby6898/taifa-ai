@@ -204,6 +204,35 @@ async function recordBatchCompletion(sessionKey, campaignId, filePaths) {
   return { success: true, campaign: campaignRowToObject(updated[0]) };
 }
 
+// Advances batch_number without appending to completed_files, for a
+// batch the human REJECTED rather than applied -- the files in it were
+// never written, so they must not be recorded as completed, but the
+// batch counter still needs to move forward so batch-number messaging
+// (e.g. "batch 3 of N") stays accurate as the campaign continues to the
+// next batch. See /api/plan/reject's skip-and-continue path.
+async function recordBatchRejection(sessionKey, campaignId) {
+  const projectId = await getOrCreateProjectId(sessionKey);
+  const { rows } = await pool.query(
+    "SELECT * FROM plan_campaigns WHERE project_id = $1 AND external_id = $2 AND resolution IS NULL",
+    [projectId, campaignId]
+  );
+
+  if (rows.length === 0) {
+    return { success: false, reason: "No matching active campaign found" };
+  }
+
+  const batchNumber = rows[0].batch_number + 1;
+
+  const { rows: updated } = await pool.query(
+    `UPDATE plan_campaigns SET batch_number = $1, updated_at = now()
+     WHERE project_id = $2 AND external_id = $3
+     RETURNING *`,
+    [batchNumber, projectId, campaignId]
+  );
+
+  return { success: true, campaign: campaignRowToObject(updated[0]) };
+}
+
 async function takeNextBatch(sessionKey, campaignId, maxFiles) {
   const projectId = await getOrCreateProjectId(sessionKey);
   const { rows } = await pool.query(
@@ -249,6 +278,7 @@ module.exports = {
   getActiveCampaign,
   startCampaign,
   recordBatchCompletion,
+  recordBatchRejection,
   takeNextBatch,
   clearCampaign,
   MAX_PLAN_FILES

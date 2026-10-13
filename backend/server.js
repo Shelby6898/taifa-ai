@@ -40,7 +40,7 @@ const { runTests } = require("./testRunner");
 const { buildTree } = require("./fileTree");
 const { parseRememberCommand } = require("./rememberCommandParser");
 const { parsePlanCommand } = require("./planCommandParser");
-const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, updateFileInPlan, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
+const { hasPendingPlan, createPlan, getPendingPlan, enrichWithDiffs, updateFileInPlan, clearPlan, isValidPlanId, hasActiveCampaign, getActiveCampaign, startCampaign, recordBatchCompletion, recordBatchRejection, takeNextBatch, clearCampaign, MAX_PLAN_FILES } = require("./planState");
 const { checkVocabularyConsistency, checkExcludedScope, checkMissingRequiredScope } = require("./planValidator");
 const { assertGeneratedContentMatchesArchitecture } = require("./architectureContentValidator");
 const { hasPendingClarification, getPhase, startClarification, recordAnswer, isComplete, getCurrentQuestion, getPendingClarification, buildRequirementsSummary, setPhase, setEnrichedDescription, getEnrichedDescription, beginArchitectureConfirmation, getRelevantFiles, beginBlueprintConfirmation, getBlueprint, clearClarification } = require("./clarificationState");
@@ -2093,14 +2093,27 @@ app.post("/api/plan/reject", requireAuth, async (req, res) => {
     }
 
     await clearPlan(sessionKey, "rejected");
-
     let campaignCleared = false;
-    if (await hasActiveCampaign(sessionKey)) {
-      await clearCampaign(sessionKey, "rejected");
-      campaignCleared = true;
-    }
+    let nextBatch = null;
+    let campaignComplete = false;
 
-    return res.json({ success: true, action: "plan_cleared", campaignCleared });
+    if (await hasActiveCampaign(sessionKey)) {
+      const campaignBefore = await getActiveCampaign(sessionKey);
+      await recordBatchRejection(sessionKey, campaignBefore.id);
+
+      const campaign = await getActiveCampaign(sessionKey);
+      const { files: nextFiles } = await takeNextBatch(sessionKey, campaign.id, MAX_PLAN_FILES);
+
+      if (!Array.isArray(nextFiles) || nextFiles.length === 0) {
+        await clearCampaign(sessionKey, "rejected");
+        campaignCleared = true;
+        campaignComplete = true;
+      } else {
+        const createdPlan = await createPlan(sessionKey, { description: campaign.description, files: nextFiles });
+        nextBatch = { planId: createdPlan.id, description: createdPlan.description, files: createdPlan.files };
+      }
+    }
+    return res.json({ success: true, action: "plan_cleared", campaignCleared, campaignComplete, nextBatch });
   } catch (err) {
     console.error("[planState] /api/plan/reject failed:", err.message);
     return res.status(500).json({ success: false, reason: "Internal error" });

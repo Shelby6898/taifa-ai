@@ -473,16 +473,27 @@ function Chat({ currentProject }) {
     if (!pendingDiffs) return;
 
     try {
-      await authFetch("http://localhost:5000/api/plan/reject", {
+      const response = await authFetch("http://localhost:5000/api/plan/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ planId: pendingDiffs.planId, projectName: currentProject })
       });
+
+      const result = await response.json();
+
+      if (result.nextBatch) {
+        setPlanStatus("This batch was rejected — nothing was written. Next batch ready for review.");
+        setPendingPlan(result.nextBatch);
+      } else if (result.campaignComplete) {
+        setPlanStatus("This batch was rejected — nothing was written. No files remained, so the campaign has ended.");
+      } else {
+        setPlanStatus("Plan rejected — nothing was written.");
+      }
     } catch (err) {
       console.error("Reject diffs failed:", err);
+      setPlanStatus("Plan rejected — nothing was written.");
     } finally {
       setPendingDiffs(null);
-      setPlanStatus("Plan rejected — nothing was written.");
     }
   };
 
