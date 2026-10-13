@@ -9,7 +9,7 @@ Most AI coding tools depend on constant internet access, paid subscriptions, and
 Browser (React, :3000)
 Express backend (:5000)
 Ollama (:11434)
-qwen2.5-coder:3b (3.1B params, 32768 max context; no custom num_ctx set, so it runs at Ollama's built-in runtime default rather than the model's max)
+qwen2.5-coder-3b-6k (a custom model built from qwen2.5-coder:3b with a 6144-token context) for code generation, planning, tests and documentation; qwen2.5-coder-6k (built from qwen2.5-coder:1.5b, also 6144 tokens) for free-form chat and commit messages
 PostgreSQL (local, `taifa_ai` database) — durable, relational state: project memory facts, conversation history, plans and multi-batch campaigns. Session-derived caches (file index, import/component/DB-schema graphs) stay on disk as JSON, rebuilt from source rather than treated as source of truth.
 
 The backend is multi-tenant: every request is scoped to a session key (`studentId:projectName`), and each student's project gets its own workspace directory (`workspace/<studentId>/<projectName>/`), its own file index and dependency graphs, its own file watcher (created on first use, closed after 25 minutes idle, transparently recreated on next use), and its own conversation history — all fully isolated from every other student and every other project. See the Phase 6 section below for the full breakdown.
@@ -123,7 +123,11 @@ Prerequisites: Node.js, npm, and Ollama installed.
 Pull the model:
 ollama pull qwen2.5-coder:3b
 
-No custom Modelfile is required — the code points directly at qwen2.5-coder:3b, which runs at Ollama's built-in runtime default context rather than an explicitly set num_ctx.
+Then build the two custom models the code calls (each sets a 6144-token context). Run these from the repo root:
+
+ollama pull qwen2.5-coder:1.5b
+ollama create qwen2.5-coder-3b-6k -f Modelfile-3b
+ollama create qwen2.5-coder-6k -f Modelfile
 
 Start Ollama: ollama serve
 
@@ -211,11 +215,11 @@ workspace/<studentId>/<projectName>/ — the per-student, per-project sandbox fo
 
 ## Status
 
-All seven phases complete, including a deliberately rescoped Phase 6 (the original fully-autonomous-project-building vision was ruled out as unrealistic and unsafe for a local-only 1.5B model; the human-supplied-architecture version keeps the same safety guarantees while getting real practical value). Phase 6 has since grown to include a full multi-tenancy conversion (session isolation at every layer: state, filesystem, watchers, backups), a refresh-recovery system, server-stored per-project conversation history, and the UI work to support all of it — turning the tool from something that could only safely serve one person at a time into one that can serve a whole class of students concurrently. Before that, the verification pipeline was hardened: AI self-review was removed in favor of mechanical test-suite verification after proving structurally unreliable in testing, route regression checking and package.json checking were added as additional gates, and edit: was rebuilt on scoped SEARCH/REPLACE patching with per-block partial-application instead of full-file regeneration. Phase 7 moved persistent state (project memory, conversation history, plans and campaigns) from per-session JSON files to PostgreSQL, added two more codeValidator checks found during that work, and fixed a real workspace-creation bug and a project-deletion cleanup gap along the way. Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
+All seven phases complete, including a deliberately rescoped Phase 6 (the original fully-autonomous-project-building vision was ruled out as unrealistic and unsafe for a local-only small model; the human-supplied-architecture version keeps the same safety guarantees while getting real practical value). Phase 6 has since grown to include a full multi-tenancy conversion (session isolation at every layer: state, filesystem, watchers, backups), a refresh-recovery system, server-stored per-project conversation history, and the UI work to support all of it — turning the tool from something that could only safely serve one person at a time into one that can serve a whole class of students concurrently. Before that, the verification pipeline was hardened: AI self-review was removed in favor of mechanical test-suite verification after proving structurally unreliable in testing, route regression checking and package.json checking were added as additional gates, and edit: was rebuilt on scoped SEARCH/REPLACE patching with per-block partial-application instead of full-file regeneration. Phase 7 moved persistent state (project memory, conversation history, plans and campaigns) from per-session JSON files to PostgreSQL, added two more codeValidator checks found during that work, and fixed a real workspace-creation bug and a project-deletion cleanup gap along the way. Actively developed. See commit history for the order features were built and the real bugs found and fixed at each step.
 
 ## Known limitations
 
-- Small local model (qwen2.5-coder:3b, 3.1B params, running at Ollama's default context rather than an explicitly set num_ctx): good for straightforward, well-scoped tasks; demonstrably unreliable at holding cross-file consistency and at reliably following explicit instructions.
+- Small local model (qwen2.5-coder-3b-6k: a 3B model with a 6144-token context window): good for straightforward, well-scoped tasks; demonstrably unreliable at holding cross-file consistency and at reliably following explicit instructions.
 - Plan, campaign, pending tool-action, and pending single-file-write state
 Documentation generation can fabricate plausible-sounding but false technical details. Always review before approving.
 - AI self-review was removed after proving structurally unreliable (it missed a real regression and hallucinated fake issues in testing); mechanical test-suite verification, route regression checking, and package.json checking now serve this role instead.
