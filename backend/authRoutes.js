@@ -9,7 +9,7 @@ const User = require("./authStore");
 const { generateCode, verifyCode } = require("./verificationCodes");
 const { generateToken: generateResetToken, verifyToken: verifyResetToken } = require("./resetTokens");
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
+const JWT_SECRET = require("./jwtSecret");
 const resend = new Resend(process.env.RESEND_API_KEY);
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 

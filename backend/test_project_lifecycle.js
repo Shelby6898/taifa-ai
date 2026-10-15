@@ -10,8 +10,7 @@ const PROJECT = "lifecycle-test-project";
 const PORT = 5000;
 const BASE = `http://localhost:${PORT}`;
 
-const JWT_SECRET =
-  process.env.JWT_SECRET || "dev-secret-change-in-production";
+const JWT_SECRET = require("./jwtSecret");
 
 const token = jwt.sign(
   { id: USER_ID },
