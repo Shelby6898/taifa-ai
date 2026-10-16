@@ -18,7 +18,7 @@ const { backupExistingFile } = require("./backupManager");
 const { searchIndex, buildIndex, formatFullIndex } = require("./fileIndexer");
 const { parseWriteCommand } = require("./writeCommandParser");
 const { isPathSafe } = require("./pathSafety");
-const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint , generateDescriptionFix, generateTargetedAddition } = require("./generateFileContent");
+const { generateFileContent, generateFix, generateDocumentation, generatePlan, generateSelfReview, generateTestFile, generateClarifyingQuestions, generateBlueprint , generateDescriptionFix, generateTargetedAddition, generateFullFileFix } = require("./generateFileContent");
 const { parseTestGenerationCommand } = require("./testGenerationCommandParser");
 const { parseExecutePlanCommand } = require("./executePlanCommandParser");
 const { parseSelfReview } = require("./selfReviewParser");
@@ -2353,7 +2353,7 @@ app.post("/api/plan/fix-file", requireAuth, async (req, res) => {
   startGenerating(sessionKey, `Fixing ${filePath}`, "diffs");
 
   try {
-    const { content: cleanedContent, patchWarnings } = await generateFix({
+    const { content: cleanedContent, patchWarnings } = await generateFullFileFix({
       targetPath: filePath,
       errorText,
       existingContent: fileEntry.after,

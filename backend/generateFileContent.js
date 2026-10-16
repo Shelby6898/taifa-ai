@@ -125,6 +125,35 @@ Rules:
 - Output ONLY the SEARCH/REPLACE block(s). No explanation, no markdown code fences, no other text. If the file content above does not appear to actually be the cause of this error, make your best reasonable attempt at a fix anyway, still in SEARCH/REPLACE format.`;
 }
 
+// Full-file regeneration fix, used by /api/plan/fix-file instead of the
+// SEARCH/REPLACE scoped-edit mechanism buildFixPrompt uses. Live testing
+// showed the scoped-edit approach struggling badly specifically on files
+// that are ALREADY structurally broken (the exact case this exists for):
+// non-unique or paraphrased SEARCH anchors, and the model sometimes
+// ignoring the stated problem entirely in favor of an unrelated change.
+// Asking for the complete corrected file instead removes the anchor-
+// matching step altogether -- there's no verbatim-copy requirement to
+// fail, and a small, already-broken file is cheap to regenerate in full.
+function buildFullFileFixPrompt({ targetPath, errorText, existingContent, architecture }) {
+  return `You are fixing a broken code file at path "${targetPath}".
+
+Current (broken) file content:
+${existingContent}
+
+${buildTerminologyPrompt(architecture)}
+
+Automated checks found the following real, confirmed problems in this file, which you must fix. Do not invent or fix anything else not listed here, and do not remove any working functionality that isn't related to these problems:
+
+${errorText}
+
+Output the COMPLETE, corrected file content from the first line to the last. Do not use SEARCH/REPLACE or diff format -- output the entire file as it should read after the fix, ready to save directly to disk.
+
+Rules:
+- Preserve every part of the original file that isn't related to the listed problems, including unrelated functions, imports, comments, and formatting.
+- Make the minimum change necessary to resolve each listed problem -- do not restructure, rename, or "improve" code beyond what's needed to fix the stated issues.
+- Output ONLY the raw file content. No explanation, no markdown code fences, no commentary before or after.`;
+}
+
 function buildDocumentationPrompt({ fullIndex }) {
   return `You are writing a README.md file for a software project, based ONLY on the actual source files shown below.
 
@@ -316,6 +345,27 @@ async function generateFix(params) {
   const rawOutput = response.data.response;
 
   return applyScopedEdit(rawOutput, params.existingContent);
+}
+
+// Full-file counterpart to generateFix, used by /api/plan/fix-file. Asks
+// the model for the complete corrected file instead of a SEARCH/REPLACE
+// patch, so there's no verbatim-anchor-matching step that can fail --
+// the output is used directly as the new file content (after the usual
+// stripCodeFences cleanup, same as any other full-file generation).
+async function generateFullFileFix(params) {
+  const { stripCodeFences } = require("./stripCodeFences");
+  const prompt = buildFullFileFixPrompt(params);
+
+  const response = await axios.post(`${OLLAMA_URL}/api/generate`, {
+    model: MODEL_NAME,
+    prompt,
+    stream: false,
+    options: { num_predict: 2000 }
+  });
+
+  const rawOutput = response.data.response;
+
+  return { content: stripCodeFences(rawOutput), patchWarnings: [] };
 }
 
 async function generateDocumentation(params) {
@@ -569,5 +619,7 @@ module.exports = {
   buildBlueprintPrompt,
   generateBlueprint,
   generateDescriptionFix,
+  buildFullFileFixPrompt,
+  generateFullFileFix,
   generateTargetedAddition
 };
