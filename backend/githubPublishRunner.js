@@ -122,7 +122,8 @@ async function publishNewProject({ projectDir, projectName, run = defaultRun, fs
     );
   }
 
-  return { success: true, repoName, url: created.stdout.trim() || created.stderr.trim() };
+  const urlLine = (created.stdout + "\n" + created.stderr).split("\n").map((l) => l.trim()).find((l) => l.startsWith("https://github.com/"));
+  return { success: true, repoName, url: urlLine || null };
 }
 
 module.exports = { publishNewProject, mergeGitignore, FIRST_COMMIT_MESSAGE };

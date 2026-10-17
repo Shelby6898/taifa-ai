@@ -204,3 +204,37 @@ test("an existing .gitignore keeps its own rules on a successful publish", async
     assert.ok(content.includes(".env"));
   });
 });
+
+test("url is only the GitHub link even when gh prints extra lines", async () => {
+  await withProject(async (dir) => {
+    const { run } = makeRun((cmd) =>
+      cmd === "gh"
+        ? ok("https://github.com/Shelby6898/demo-app\nbranch 'main' set up to track 'origin/main'.\n")
+        : undefined
+    );
+    const result = await publishNewProject({ projectDir: dir, projectName: "demo-app", run });
+    assert.equal(result.success, true);
+    assert.equal(result.url, "https://github.com/Shelby6898/demo-app");
+  });
+});
+
+test("url is found when gh prints it on stderr", async () => {
+  await withProject(async (dir) => {
+    const { run } = makeRun((cmd) =>
+      cmd === "gh"
+        ? { success: true, stdout: "", stderr: "https://github.com/Shelby6898/demo-app\n" }
+        : undefined
+    );
+    const result = await publishNewProject({ projectDir: dir, projectName: "demo-app", run });
+    assert.equal(result.url, "https://github.com/Shelby6898/demo-app");
+  });
+});
+
+test("url is null, not junk, when gh prints no link", async () => {
+  await withProject(async (dir) => {
+    const { run } = makeRun((cmd) => (cmd === "gh" ? ok("done\n") : undefined));
+    const result = await publishNewProject({ projectDir: dir, projectName: "demo-app", run });
+    assert.equal(result.success, true);
+    assert.equal(result.url, null);
+  });
+});
