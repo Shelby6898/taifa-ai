@@ -1,6 +1,7 @@
 const STATUS_PHRASES = new Set(["git status", "git status:"]);
 const DIFF_PHRASES = new Set(["git diff", "git diff:"]);
 const COMMIT_PHRASES = new Set(["commit changes", "commit changes:"]);
+const PUBLISH_PHRASES = new Set(["publish to github", "publish to github:"]);
 
 function parseGitCommand(message) {
   if (!message || typeof message !== "string") {
@@ -17,6 +18,7 @@ function parseGitCommand(message) {
   if (STATUS_PHRASES.has(trimmed)) return { type: "status" };
   if (DIFF_PHRASES.has(trimmed)) return { type: "diff" };
   if (COMMIT_PHRASES.has(trimmed)) return { type: "commit" };
+  if (PUBLISH_PHRASES.has(trimmed.toLowerCase())) return { type: "publish" };
 
   return { type: null };
 }

@@ -29,6 +29,9 @@ const { findWorkspaceRelativePath } = require("./extractErrorPath");
 const { parseDocumentCommand } = require("./documentCommandParser");
 const { parseTestCommand } = require("./testCommandParser");
 const { parseGitCommand } = require("./gitCommandParser");
+const { buildPublishPreview } = require("./githubPublishPreview");
+const { publishNewProject } = require("./githubPublishRunner");
+const { getWorkspaceDir: getPublishWorkspaceDir } = require("./workspaceResolver");
 const { parseInstallCommand } = require("./installCommandParser");
 const { isGitRepo, getStatus, getDiff, commitChanges, detectRiskyPaths } = require("./gitTool");
 const { installPackage } = require("./packageManagerTool");
@@ -1112,6 +1115,43 @@ async function handleGitDiffCommand(res, sessionKey) {
   });
 }
 
+function getPublishTarget(sessionKey) {
+  return { projectDir: getPublishWorkspaceDir(sessionKey), projectName: sessionKey.split(":")[1] };
+}
+
+async function handleGitPublishCommand(res, sessionKey) {
+  if (hasPendingAction(sessionKey)) {
+    return res.status(409).json({
+      success: false,
+      action: "action_rejected",
+      reason: "Another action is already pending approval. Approve or reject it first."
+    });
+  }
+
+  const { projectDir, projectName } = getPublishTarget(sessionKey);
+  const preview = buildPublishPreview({ projectDir, projectName });
+
+  if (!preview.ok) {
+    return res.json({ success: true, action: "publish_refused", message: preview.reason });
+  }
+
+  const action = createPendingAction(sessionKey, {
+    type: "github_publish",
+    payload: { repoName: preview.repoName }
+  });
+
+  return res.json({
+    success: true,
+    action: "publish_proposed",
+    actionId: action.id,
+    repoName: preview.repoName,
+    visibility: preview.visibility,
+    fileCount: preview.fileCount,
+    filesPreview: preview.filesPreview,
+    moreFiles: preview.moreFiles
+  });
+}
+
 async function handleGitCommitCommand(res, sessionKey) {
   if (!isGitRepo(sessionKey)) {
     return res.json({ success: true, action: "git_not_repo", message: "The workspace is not a git repository." });
@@ -1216,6 +1256,21 @@ app.post("/api/tool-action/approve", requireAuth, async (req, res) => {
       }
 
       return res.json({ success: true, action: "commit_applied", stdout: result.stdout });
+    }
+
+    if (action.type === "github_publish") {
+      // Cleared BEFORE running: a publish takes many seconds, and clearing
+      // first means a double-tap on Approve gets the normal 400 instead of
+      // starting a second publish in the same folder.
+      clearPendingAction(sessionKey);
+      const { projectDir, projectName } = getPublishTarget(sessionKey);
+      const result = await publishNewProject({ projectDir, projectName });
+
+      if (!result.success) {
+        return res.json({ success: true, action: "publish_failed", stage: result.stage, reason: result.reason });
+      }
+
+      return res.json({ success: true, action: "publish_applied", repoName: result.repoName, url: result.url });
     }
 
     if (action.type === "install") {
@@ -1823,6 +1878,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   }
   if (gitCommand.type === "diff") {
     return handleGitDiffCommand(res, sessionKey);
+  }
+  if (gitCommand.type === "publish") {
+    return handleGitPublishCommand(res, sessionKey);
   }
   if (gitCommand.type === "commit") {
     return handleGitCommitCommand(res, sessionKey);
