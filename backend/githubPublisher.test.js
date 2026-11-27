@@ -5,7 +5,8 @@ const {
   toRepoName,
   validateRepoName,
   classifyPublishState,
-  detectSecretFiles
+  detectSecretFiles,
+  detectSecretContent
 } = require("./githubPublisher");
 
 test("toRepoName lowercases and replaces spaces", () => {
@@ -92,4 +93,54 @@ test("GITIGNORE_CONTENT ignores env files but re-includes the example", () => {
   assert.ok(GITIGNORE_CONTENT.includes("\n.env\n"));
   assert.ok(GITIGNORE_CONTENT.indexOf("!.env.example") > GITIGNORE_CONTENT.indexOf(".env.*"));
   assert.ok(GITIGNORE_CONTENT.endsWith("\n"));
+});
+
+
+test("detectSecretContent identifies common provider credentials", () => {
+  assert.ok(detectSecretContent("AWS_KEY=AKIA1234567890ABCDEF").includes("aws_access_key"));
+  assert.ok(detectSecretContent("token=ghp_abcdefghijklmnopqrstuvwxyz123456").includes("github_token"));
+  assert.ok(detectSecretContent("key=AIza" + "A".repeat(35)).includes("google_api_key"));
+  assert.ok(detectSecretContent("token=xoxb-1234567890-abcdefghij").includes("slack_token"));
+  assert.ok(detectSecretContent("key=sk_live_12345678901234567890").includes("stripe_key"));
+});
+
+test("detectSecretContent identifies private keys and JWT-like tokens", () => {
+  assert.ok(detectSecretContent("-----BEGIN RSA PRIVATE KEY-----").includes("private_key"));
+  assert.ok(detectSecretContent(
+    "token=eyJabcdefgh.eyJabcdefgh.signature123"
+  ).includes("jwt"));
+});
+
+test("detectSecretContent identifies credential assignments", () => {
+  assert.ok(detectSecretContent('API_KEY="a-real-looking-key-value-123"').includes("credential_assignment"));
+  assert.ok(detectSecretContent("password: SuperSecretPassword123").includes("credential_assignment"));
+});
+
+test("detectSecretContent ignores common placeholders and environment references", () => {
+  const safe = [
+    "API_KEY=your_api_key_here",
+    "SECRET_KEY=CHANGE_ME",
+    "TOKEN=example_token",
+    "PASSWORD=your_password",
+    "API_KEY=${API_KEY}",
+    "API_KEY=process.env.API_KEY",
+    "API_KEY=<your-key>"
+  ].join("\n");
+
+  assert.deepEqual(detectSecretContent(safe), []);
+});
+
+test("detectSecretContent returns categories, never the matched credential", () => {
+  const secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+  const result = detectSecretContent(`GITHUB_TOKEN=${secret}`);
+
+  assert.ok(result.includes("github_token"));
+  assert.ok(!result.includes(secret));
+  assert.ok(result.every((item) => typeof item === "string"));
+});
+
+test("detectSecretContent handles empty and non-string input", () => {
+  assert.deepEqual(detectSecretContent(""), []);
+  assert.deepEqual(detectSecretContent(null), []);
+  assert.deepEqual(detectSecretContent(undefined), []);
 });

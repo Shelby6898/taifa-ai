@@ -94,3 +94,67 @@ test("more than 20 files are truncated with a remainder count", () => {
     assert.equal(result.moreFiles, 5);
   });
 });
+
+
+test("blocks a GitHub token found inside a source file", () => {
+  withProject(["src/config.js"], (dir) => {
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    fs.writeFileSync(
+      path.join(dir, "src/config.js"),
+      `const token = "${secret}";\n`
+    );
+
+    const result = buildPublishPreview({ projectDir: dir, projectName: "demo" });
+
+    assert.equal(result.ok, false);
+    assert.ok(result.reason.includes("src/config.js"));
+    assert.ok(result.reason.includes("github_token"));
+    assert.ok(!result.reason.includes(secret));
+  });
+});
+
+test("blocks a credential assignment in an ordinary source file", () => {
+  withProject(["backend/config.js"], (dir) => {
+    fs.writeFileSync(
+      path.join(dir, "backend/config.js"),
+      'const API_KEY = "a-real-looking-secret-value-123";\n'
+    );
+
+    const result = buildPublishPreview({ projectDir: dir, projectName: "demo" });
+
+    assert.equal(result.ok, false);
+    assert.ok(result.reason.includes("backend/config.js"));
+    assert.ok(result.reason.includes("credential_assignment"));
+  });
+});
+
+test("allows safe example environment values and environment references", () => {
+  withProject([".env.example", "src/config.js"], (dir) => {
+    fs.writeFileSync(
+      path.join(dir, ".env.example"),
+      "API_KEY=your_api_key_here\nSECRET_KEY=CHANGE_ME\n"
+    );
+    fs.writeFileSync(
+      path.join(dir, "src/config.js"),
+      'const apiKey = process.env.API_KEY;\n'
+    );
+
+    const result = buildPublishPreview({ projectDir: dir, projectName: "demo" });
+
+    assert.equal(result.ok, true);
+    assert.ok(result.filesPreview.includes(".env.example"));
+  });
+});
+
+test("preview reports only file path and category, never credential content", () => {
+  withProject(["src/private.js"], (dir) => {
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    fs.writeFileSync(path.join(dir, "src/private.js"), `TOKEN=${secret}\n`);
+
+    const result = buildPublishPreview({ projectDir: dir, projectName: "demo" });
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.reason.includes(secret));
+    assert.ok(result.reason.includes("src/private.js"));
+  });
+});

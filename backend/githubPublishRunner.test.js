@@ -68,11 +68,12 @@ test("success path runs the steps in order and publishes private", async () => {
     assert.equal(result.repoName, "demo-app");
     assert.equal(result.url, "https://github.com/Shelby6898/demo-app");
     assert.deepEqual(names(calls), [
-      "git init", "git rev-parse", "git add", "git diff", "git commit", "gh repo"
+      "git init", "git rev-parse", "git add", "git diff",
+      "git show", "git show", "git commit", "gh repo"
     ]);
     assert.ok(calls[0].includes("main"));
-    assert.ok(calls[5].includes("--private"));
-    assert.ok(calls[5].includes("demo-app"));
+    assert.ok(calls[7].includes("--private"));
+    assert.ok(calls[7].includes("demo-app"));
     assert.ok(fs.readFileSync(path.join(dir, ".gitignore"), "utf8").includes(".env"));
   });
 });
@@ -132,6 +133,33 @@ test("secret files stop the publish before commit and roll back .git", async () 
     assert.equal(result.success, false);
     assert.equal(result.stage, "secrets");
     assert.ok(result.reason.includes(".env"));
+    assert.ok(!names(calls).includes("git commit"));
+    assert.ok(!names(calls).includes("gh repo"));
+    assert.ok(!fs.existsSync(gitDirOf(dir)));
+  });
+});
+
+test("staged credentials block publishing before commit and never expose the value", async () => {
+  await withProject(async (dir) => {
+    const token = "ghp_" + "A".repeat(36);
+    const { run, calls } = makeRun((cmd, args) => {
+      if (cmd === "git" && args[0] === "show" && args[1] === ":src/app.js") {
+        return ok('const API_TOKEN = "' + token + '";');
+      }
+      return undefined;
+    });
+
+    const result = await publishNewProject({
+      projectDir: dir,
+      projectName: "demo",
+      run
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.stage, "secrets");
+    assert.ok(result.reason.includes("src/app.js"));
+    assert.ok(result.reason.includes("github_token"));
+    assert.ok(!result.reason.includes(token));
     assert.ok(!names(calls).includes("git commit"));
     assert.ok(!names(calls).includes("gh repo"));
     assert.ok(!fs.existsSync(gitDirOf(dir)));

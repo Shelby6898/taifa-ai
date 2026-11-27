@@ -3,7 +3,7 @@
 
 const nodeFs = require("fs");
 const path = require("path");
-const { toRepoName, validateRepoName, detectSecretFiles } = require("./githubPublisher");
+const { toRepoName, validateRepoName, detectSecretFiles, detectSecretContent } = require("./githubPublisher");
 
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".cache", "__pycache__", ".git"]);
 const SAFE_ENV_NAMES = new Set([".env.example", ".env.sample", ".env.template"]);
@@ -35,6 +35,58 @@ function listProjectFiles(dir, fs) {
   return out;
 }
 
+
+const MAX_CONTENT_FILE_BYTES = 1024 * 1024;
+const MAX_CONTENT_SCAN_BYTES = 20 * 1024 * 1024;
+
+function scanPublishContents(files, projectDir, fs) {
+  const findings = [];
+  let totalBytes = 0;
+
+  for (const relativePath of files) {
+    const fullPath = path.join(projectDir, relativePath);
+    let content;
+
+    try {
+      content = fs.readFileSync(fullPath);
+    } catch {
+      return {
+        ok: false,
+        reason: "Could not safely scan file: " + relativePath
+      };
+    }
+
+    const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content);
+    if (buffer.length > MAX_CONTENT_FILE_BYTES) {
+      return {
+        ok: false,
+        reason: "File exceeds the 1 MB content-scanning limit: " + relativePath
+      };
+    }
+
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_CONTENT_SCAN_BYTES) {
+      return {
+        ok: false,
+        reason: "Project exceeds the 20 MB total content-scanning limit."
+      };
+    }
+
+    // Binary files are not treated as text credentials.
+    if (buffer.includes(0)) continue;
+
+    const categories = detectSecretContent(buffer.toString("utf8"));
+    if (categories.length > 0) {
+      findings.push({
+        path: relativePath,
+        categories
+      });
+    }
+  }
+
+  return { ok: true, findings };
+}
+
 function buildPublishPreview({ projectDir, projectName, fs = nodeFs }) {
   const repoName = toRepoName(projectName);
   const nameCheck = validateRepoName(repoName);
@@ -63,6 +115,21 @@ function buildPublishPreview({ projectDir, projectName, fs = nodeFs }) {
     return {
       ok: false,
       reason: "Refusing to propose a publish: these files look like secrets and are not covered by .gitignore: " + blocking.join(", ") + "."
+    };
+  }
+
+  const contentScan = scanPublishContents(files, projectDir, fs);
+  if (!contentScan.ok) {
+    return { ok: false, reason: contentScan.reason };
+  }
+
+  if (contentScan.findings.length > 0) {
+    const details = contentScan.findings.map(
+      (item) => item.path + " (" + item.categories.join(", ") + ")"
+    );
+    return {
+      ok: false,
+      reason: "Refusing to propose a publish: possible credentials found in file contents: " + details.join("; ") + ". Remove them or replace them with environment-variable references."
     };
   }
 

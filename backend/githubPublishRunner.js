@@ -10,7 +10,8 @@ const {
   toRepoName,
   validateRepoName,
   classifyPublishState,
-  detectSecretFiles
+  detectSecretFiles,
+  detectSecretContent
 } = require("./githubPublisher");
 
 const FIRST_COMMIT_MESSAGE = "Initial commit from Taifa AI";
@@ -19,7 +20,7 @@ const GH_TIMEOUT_MS = 120000;
 
 function defaultRun(cmd, args, options) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd: options.cwd, timeout: options.timeout }, (error, stdout, stderr) => {
+    execFile(cmd, args, { cwd: options.cwd, timeout: options.timeout, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
       resolve({ success: error === null, stdout: stdout || "", stderr: stderr || "" });
     });
   });
@@ -105,6 +106,53 @@ async function publishNewProject({ projectDir, projectName, run = defaultRun, fs
   const secrets = detectSecretFiles(stagedFiles);
   if (secrets.length > 0) {
     return fail("secrets", "Refusing to publish: these files look like secrets: " + secrets.join(", ") + ".");
+  }
+
+
+  // Scan the exact staged Git blobs, not potentially changed working files.
+  const MAX_CONTENT_FILE_BYTES = 1024 * 1024;
+  const MAX_CONTENT_SCAN_BYTES = 20 * 1024 * 1024;
+  let totalContentBytes = 0;
+
+  for (const relativePath of stagedFiles) {
+    const blob = await git(["show", ":" + relativePath]);
+
+    if (!blob.success) {
+      return fail(
+        "secrets",
+        "Could not safely inspect staged file: " + relativePath
+      );
+    }
+
+    const content = blob.stdout || "";
+    const byteLength = Buffer.byteLength(content, "utf8");
+
+    if (byteLength > MAX_CONTENT_FILE_BYTES) {
+      return fail(
+        "secrets",
+        "Staged file exceeds the 1 MB content-scanning limit: " + relativePath
+      );
+    }
+
+    totalContentBytes += byteLength;
+    if (totalContentBytes > MAX_CONTENT_SCAN_BYTES) {
+      return fail(
+        "secrets",
+        "Staged project exceeds the 20 MB total content-scanning limit."
+      );
+    }
+
+    // Binary files are not interpreted as text credentials.
+    if (content.includes("\0")) continue;
+
+    const categories = detectSecretContent(content);
+    if (categories.length > 0) {
+      return fail(
+        "secrets",
+        "Refusing to publish: possible credentials found in " +
+          relativePath + " (" + categories.join(", ") + ")."
+      );
+    }
   }
 
   const commit = await git(["commit", "-m", FIRST_COMMIT_MESSAGE]);
