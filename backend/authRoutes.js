@@ -3,18 +3,22 @@ const router = express.Router();
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
-const { Resend } = require("resend");
-const { OAuth2Client } = require("google-auth-library");
-const User = require("./authStore");
-const { generateCode, verifyCode } = require("./verificationCodes");
-const { generateToken: generateResetToken, verifyToken: verifyResetToken } = require("./resetTokens");
 
+const User = require("./authStore");
+const { requireAuth } = require("./authMiddleware");
 const JWT_SECRET = require("./jwtSecret");
-const resend = new Resend(process.env.RESEND_API_KEY);
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 function generateToken(userId) {
   return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: "12h" });
+}
+
+function validUsername(username) {
+  return typeof username === "string" &&
+    /^[a-zA-Z0-9][a-zA-Z0-9_-]{2,23}$/.test(username.trim());
+}
+
+function validPassword(password) {
+  return typeof password === "string" && password.length >= 8;
 }
 
 const loginLimiter = rateLimit({
@@ -33,167 +37,138 @@ const registerLimiter = rateLimit({
   message: { error: "Too many registration attempts. Please try again later." }
 });
 
-const sendCodeLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
+const accountChangeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many verification code requests. Please try again later." }
-});
-
-router.post("/send-code", sendCodeLimiter, async (req, res) => {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: "Email is required" });
-  }
-
-  const code = generateCode(email);
-
-  try {
-    await resend.emails.send({
-      from: "Taifa AI <onboarding@resend.dev>",
-      to: email,
-      subject: "Your Taifa AI verification code",
-      text: `Your verification code is ${code}. It expires in 10 minutes.`
-    });
-    res.json({ message: "Verification code sent" });
-  } catch (error) {
-    console.error("Failed to send verification email:", error.message);
-    res.status(500).json({ error: "Failed to send verification email" });
-  }
+  message: { error: "Too many account changes. Please try again later." }
 });
 
 router.post("/register", registerLimiter, async (req, res) => {
-  const { username, password, code } = req.body;
-  if (!username || !password || !code) {
-    return res.status(400).json({ error: "Username, password, and verification code are required" });
-  }
-  if (password.length < 8) {
-    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  const { username, password } = req.body || {};
+
+  if (!validUsername(username)) {
+    return res.status(400).json({
+      error: "Username must be 3–24 characters: letters, numbers, underscores or hyphens."
+    });
   }
 
-  const codeResult = verifyCode(username, code);
-  if (!codeResult.valid) {
-    return res.status(400).json({ error: codeResult.reason });
+  if (!validPassword(password)) {
+    return res.status(400).json({
+      error: "Password must be at least 8 characters."
+    });
   }
 
   try {
     const user = await User.create({ username, password });
-    res.status(201).json({ message: "Registered successfully", user });
+    return res.status(201).json({
+      message: "Account created successfully. Log in below.",
+      user
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Failed to register user" });
+    return res.status(400).json({
+      error: error.message || "Failed to create account."
+    });
   }
 });
 
 router.post("/login", loginLimiter, async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: "Username and password are required" });
+  const { username, password } = req.body || {};
+
+  if (typeof username !== "string" || !username.trim() ||
+      typeof password !== "string" || !password) {
+    return res.status(400).json({
+      error: "Username and password are required."
+    });
   }
+
   try {
     const user = await User.findOne({ username });
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
-
-    const passwordMatches = await bcrypt.compare(password, user.password);
-    if (!passwordMatches) return res.status(401).json({ error: "Invalid credentials" });
-
-    res.json({ message: "Login successful", token: generateToken(user._id), username: user.username });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to login user" });
-  }
-});
-
-// Frontend sends the ID token it gets back from Google Identity
-// Services after the user picks an account -- this route is the only
-// place that ever trusts it, by verifying the signature and audience
-// against our own registered client ID before extracting anything
-// from its payload.
-router.post("/google", loginLimiter, async (req, res) => {
-  const { credential } = req.body;
-  if (!credential) {
-    return res.status(400).json({ error: "Google credential is required" });
-  }
-
-  try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID
-    });
-    const payload = ticket.getPayload();
-
-    const user = await User.linkOrCreateGoogleUser({ googleId: payload.sub, email: payload.email });
-    res.json({ message: "Login successful", token: generateToken(user._id), username: user.username });
-  } catch (error) {
-    console.error("Google sign-in failed:", error.message);
-    res.status(401).json({ error: "Google sign-in failed" });
-  }
-});
-
-// The client ID itself isn't a secret (it's meant to be public -- it's
-// sent to Google directly from the browser), but keeping it in one
-// place server-side avoids needing a separate frontend build-time env
-// var that has to be kept in sync with this one.
-router.get("/google-client-id", (req, res) => {
-  res.json({ clientId: process.env.GOOGLE_CLIENT_ID || null });
-});
-
-const forgotPasswordLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many password reset requests. Please try again later." }
-});
-
-// Deliberately responds with the same generic message whether or not
-// the email is actually registered -- confirming or denying an
-// account's existence here would let this endpoint be used to check
-// which emails have accounts, independent of whether the reset itself
-// ever gets used.
-router.post("/forgot-password", forgotPasswordLimiter, async (req, res) => {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: "Email is required" });
-  }
-
-  try {
-    const user = await User.findOne({ username: email });
-    if (user) {
-      const token = generateResetToken(email);
-      const resetLink = `http://localhost:3000/?resetToken=${token}`;
-      await resend.emails.send({
-        from: "Taifa AI <onboarding@resend.dev>",
-        to: email,
-        subject: "Reset your Taifa AI password",
-        text: `Click the link below to reset your password. This link expires in 30 minutes.\n\n${resetLink}`
-      });
+    if (!user || !user.password) {
+      return res.status(401).json({ error: "Invalid credentials." });
     }
-    res.json({ message: "If an account exists for this email, a reset link has been sent." });
+
+    const matches = await bcrypt.compare(password, user.password);
+    if (!matches) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+
+    return res.json({
+      message: "Login successful",
+      token: generateToken(user._id),
+      username: user.username
+    });
   } catch (error) {
-    console.error("Failed to process password reset request:", error.message);
-    res.status(500).json({ error: "Failed to process password reset request" });
+    console.error("Local login failed:", error.message);
+    return res.status(500).json({ error: "Failed to log in." });
   }
 });
 
-router.post("/reset-password", async (req, res) => {
-  const { token, newPassword } = req.body;
-  if (!token || !newPassword) {
-    return res.status(400).json({ error: "Token and new password are required" });
+router.get("/me", requireAuth, (req, res) => {
+  try {
+    const user = User.findById(req.userId);
+    if (!user) return res.status(404).json({ error: "Account not found." });
+
+    return res.json({
+      user: {
+        id: user._id,
+        username: user.username
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to load account." });
   }
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: "Password must be at least 8 characters" });
+});
+
+router.post("/change-username", requireAuth, accountChangeLimiter, async (req, res) => {
+  const { currentPassword, newUsername } = req.body || {};
+
+  if (!validUsername(newUsername)) {
+    return res.status(400).json({
+      error: "New username must be 3–24 characters: letters, numbers, underscores or hyphens."
+    });
   }
 
-  const tokenResult = verifyResetToken(token);
-  if (!tokenResult.valid) {
-    return res.status(400).json({ error: tokenResult.reason });
+  if (typeof currentPassword !== "string" || !currentPassword) {
+    return res.status(400).json({ error: "Current password is required." });
   }
 
   try {
-    await User.updatePassword(tokenResult.email, newPassword);
-    res.json({ message: "Password reset successfully" });
+    const user = await User.changeUsername(
+      req.userId,
+      currentPassword,
+      newUsername
+    );
+    return res.json({
+      message: "Username updated successfully.",
+      username: user.username
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Failed to reset password" });
+    const status = error.message === "Account not found" ? 404 : 400;
+    return res.status(status).json({ error: error.message });
+  }
+});
+
+router.post("/change-password", requireAuth, accountChangeLimiter, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (typeof currentPassword !== "string" || !currentPassword) {
+    return res.status(400).json({ error: "Current password is required." });
+  }
+
+  if (!validPassword(newPassword)) {
+    return res.status(400).json({
+      error: "New password must be at least 8 characters."
+    });
+  }
+
+  try {
+    await User.changePassword(req.userId, currentPassword, newPassword);
+    return res.json({ message: "Password updated successfully." });
+  } catch (error) {
+    const status = error.message === "Account not found" ? 404 : 400;
+    return res.status(status).json({ error: error.message });
   }
 });
 

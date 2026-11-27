@@ -17,3 +17,6 @@ frontend/build/
 backend/data/
 workspace/
 logfile
+
+# Local recovery backups
+backups/

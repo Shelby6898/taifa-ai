@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import Chat from "./Chat";
 import LearningChat from "./LearningChat";
 import Login from "./Login";
-import ResetPassword from "./ResetPassword";
+import AccountSettings from "./AccountSettings";
 import { getToken, clearToken, authFetch } from "./authFetch";
 
 function App() {
@@ -11,6 +11,7 @@ function App() {
   const [currentProject, setCurrentProject] = useState("");
   const [activeMode, setActiveMode] = useState("project");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showAccountSettings, setShowAccountSettings] = useState(false);
   const [theme, setTheme] = useState(() => {
     return localStorage.getItem("taifa_theme") === "light" ? "light" : "dark";
   });
@@ -122,14 +123,6 @@ function App() {
     }
   };
 
-  // Checked ahead of everything else, including login state -- a
-  // password reset link has to work whether or not the person
-  // clicking it happens to still be logged in on this device.
-  const resetToken = new URLSearchParams(window.location.search).get("resetToken");
-  if (resetToken) {
-    return <ResetPassword token={resetToken} />;
-  }
-
   if (!loggedIn) {
     return <Login onLogin={() => setLoggedIn(true)} />;
   }
@@ -228,12 +221,22 @@ function App() {
           </div>
           <button
             className="sidebar-logout"
+            onClick={() => setShowAccountSettings(true)}
+          >
+            <span>⚙</span> Manage account
+          </button>
+          <button
+            className="sidebar-logout"
             onClick={() => { clearToken(); setLoggedIn(false); }}
           >
             <span>↪</span> Sign out
           </button>
         </div>
       </aside>
+
+      {showAccountSettings && (
+        <AccountSettings onClose={() => setShowAccountSettings(false)} />
+      )}
 
       {sidebarOpen && (
         <button
