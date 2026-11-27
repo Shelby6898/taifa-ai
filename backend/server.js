@@ -78,6 +78,7 @@ function validateArchitectureContentOrThrow(sessionKey, content, targetPath) {
 const { FIXED_PLANNING_QUESTIONS, SHORT_PLANNING_QUESTIONS } = require("./planningQuestions");
 const { addFact, formatMemoryBlock } = require("./projectMemory");
 const authRoutes = require("./authRoutes");
+const learningChatRoutes = require("./learningChatRoutes");
 const { requireAuth } = require("./authMiddleware");
 const { deleteProject } = require("./projectDeletion");
 
@@ -217,6 +218,7 @@ const MAX_HISTORY_TURNS = 3;
 app.use(cors());
 app.use(express.json());
 app.use("/api/auth", authRoutes);
+app.use("/api/learning", learningChatRoutes);
 
 app.get("/", (req, res) => {
   res.json({
@@ -1137,7 +1139,7 @@ async function handleGitPublishCommand(res, sessionKey) {
 
   const action = createPendingAction(sessionKey, {
     type: "github_publish",
-    payload: { repoName: preview.repoName }
+    payload: { repoName: preview.repoName, visibility: preview.visibility, fileCount: preview.fileCount, filesPreview: preview.filesPreview, moreFiles: preview.moreFiles }
   });
 
   return res.json({

@@ -62,3 +62,27 @@ CREATE TABLE IF NOT EXISTS plan_campaigns (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_plan_campaigns_project_pending ON plan_campaigns(project_id) WHERE resolution IS NULL;
+
+-- Independent Learning Chat conversations (not linked to projects).
+CREATE TABLE IF NOT EXISTS learning_conversations (
+  id SERIAL PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT 'New learning chat',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_conversations_student
+ON learning_conversations(student_id, updated_at DESC);
+
+-- Learning messages are isolated from project conversation_messages.
+CREATE TABLE IF NOT EXISTS learning_messages (
+  id SERIAL PRIMARY KEY,
+  conversation_id INTEGER NOT NULL REFERENCES learning_conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_messages_conversation
+ON learning_messages(conversation_id, created_at, id);

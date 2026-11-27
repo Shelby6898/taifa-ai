@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import Chat from "./Chat";
+import LearningChat from "./LearningChat";
 import Login from "./Login";
 import ResetPassword from "./ResetPassword";
 import { getToken, clearToken, authFetch } from "./authFetch";
@@ -8,6 +9,16 @@ function App() {
   const [loggedIn, setLoggedIn] = useState(!!getToken());
   const [projects, setProjects] = useState([]);
   const [currentProject, setCurrentProject] = useState("");
+  const [activeMode, setActiveMode] = useState("project");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [theme, setTheme] = useState(() => {
+    return localStorage.getItem("taifa_theme") === "light" ? "light" : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("taifa_theme", theme);
+  }, [theme]);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -38,16 +49,6 @@ function App() {
 
     loadProjects();
   }, [loggedIn]);
-
-  const handleProjectChange = (e) => {
-    if (e.target.value === "__new__") {
-      setNewProjectName("");
-      setShowNewProjectModal(true);
-      return;
-    }
-
-    setCurrentProject(e.target.value);
-  };
 
   const handleCreateProject = async () => {
     const trimmed = newProjectName.trim();
@@ -135,32 +136,141 @@ function App() {
 
   return (
     <div className="app-shell">
-      <div className="app-topbar">
-        {!loadingProjects && (
-          <select value={currentProject} onChange={handleProjectChange} style={{ marginRight: 12 }}>
-            {projects.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-            <option value="__new__">+ New Project</option>
-          </select>
-        )}
-        {currentProject && (
-          <button
-            className="delete-project-btn"
-            onClick={handleDeleteProject}
-            style={{ marginRight: 12 }}
-          >
-            delete project
-          </button>
-        )}
+      <button
+        className="mobile-menu-btn"
+        onClick={() => setSidebarOpen(!sidebarOpen)}
+        aria-label="Toggle navigation"
+      >
+        ☰
+      </button>
+
+      <aside className={`app-sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
+        <div className="sidebar-brand">
+          <div className="brand-mark">T</div>
+          <div>
+            <strong>TAIFA AI</strong>
+            <span>INTELLIGENT WORKSPACE</span>
+          </div>
+        </div>
+
+        <div className="sidebar-section-label">WORKSPACE</div>
+
         <button
-          className="logout-btn"
-          onClick={() => { clearToken(); setLoggedIn(false); }}
+          className={`sidebar-nav-item ${activeMode === "project" ? "active" : ""}`}
+          onClick={() => { setActiveMode("project"); setSidebarOpen(false); }}
         >
-          logout
+          <span className="sidebar-nav-icon">⌘</span>
+          <span>Project Chat</span>
         </button>
-      </div>
-      {currentProject && <Chat key={currentProject} currentProject={currentProject} />}
+
+        <button
+          className={`sidebar-nav-item ${activeMode === "learning" ? "active" : ""}`}
+          onClick={() => { setActiveMode("learning"); setSidebarOpen(false); }}
+        >
+          <span className="sidebar-nav-icon">✧</span>
+          <span>Learning Chat</span>
+        </button>
+
+        {activeMode === "project" && (
+          <div className="sidebar-projects">
+            <div className="sidebar-section-heading">
+              <span>YOUR PROJECTS</span>
+              <button onClick={() => { setNewProjectName(""); setShowNewProjectModal(true); }}>
+                +
+              </button>
+            </div>
+
+            {loadingProjects ? (
+              <div className="sidebar-muted">Loading projects...</div>
+            ) : projects.length === 0 ? (
+              <div className="sidebar-muted">No projects yet</div>
+            ) : projects.map((project) => (
+              <button
+                key={project}
+                className={`sidebar-project-item ${currentProject === project ? "active" : ""}`}
+                onClick={() => { setCurrentProject(project); setSidebarOpen(false); }}
+                title={project}
+              >
+                <span className="project-indicator" />
+                <span>{project}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="sidebar-appearance">
+          <div className="sidebar-section-label">APPEARANCE</div>
+          <div className="theme-switcher">
+            <button
+              className={theme === "dark" ? "theme-option active" : "theme-option"}
+              onClick={() => setTheme("dark")}
+              aria-pressed={theme === "dark"}
+            >
+              <span>☾</span> Dark
+            </button>
+            <button
+              className={theme === "light" ? "theme-option active" : "theme-option"}
+              onClick={() => setTheme("light")}
+              aria-pressed={theme === "light"}
+            >
+              <span>☀</span> Light
+            </button>
+          </div>
+        </div>
+
+        <div className="sidebar-bottom">
+          <div className="sidebar-account">
+            <div className="account-avatar">U</div>
+            <div>
+              <strong>My workspace</strong>
+              <span>Signed in</span>
+            </div>
+          </div>
+          <button
+            className="sidebar-logout"
+            onClick={() => { clearToken(); setLoggedIn(false); }}
+          >
+            <span>↪</span> Sign out
+          </button>
+        </div>
+      </aside>
+
+      {sidebarOpen && (
+        <button
+          className="sidebar-overlay"
+          onClick={() => setSidebarOpen(false)}
+          aria-label="Close navigation"
+        />
+      )}
+
+      <main className="app-main">
+        <header className="workspace-header">
+          <div>
+            <div className="workspace-eyebrow">TAIFA AI / WORKSPACE</div>
+            <h1>{activeMode === "project" ? currentProject || "Project Workspace" : "Learning Space"}</h1>
+          </div>
+          {activeMode === "project" && currentProject && (
+            <button className="delete-project-btn" onClick={handleDeleteProject}>
+              Delete project
+            </button>
+          )}
+        </header>
+
+        <section className="workspace-content">
+          {activeMode === "project" && currentProject && (
+            <Chat key={currentProject} currentProject={currentProject} />
+          )}
+          {activeMode === "project" && !currentProject && !loadingProjects && (
+            <div className="workspace-empty">
+              <h2>Create your first project</h2>
+              <p>Start a dedicated workspace for your development work.</p>
+              <button onClick={() => setShowNewProjectModal(true)}>+ New project</button>
+            </div>
+          )}
+          {activeMode === "learning" && <LearningChat />}
+        </section>
+      </main>
+
       {showNewProjectModal && (
         <div
           style={{
