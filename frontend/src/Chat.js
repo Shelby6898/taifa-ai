@@ -44,7 +44,7 @@ function Chat({ currentProject }) {
         const historyData = await historyResponse.json();
 
         if (historyData.success && historyData.history.length > 0) {
-          const skipActions = new Set(["propose_write", "plan_proposed", "architecture_blueprint", "commit_proposed", "install_proposed"]);
+          const skipActions = new Set(["propose_write", "plan_proposed", "architecture_blueprint", "commit_proposed", "install_proposed", "publish_proposed"]);
           const restored = historyData.history
             .filter((turn) => turn.role === "user" || !skipActions.has(turn.action))
             .map((turn) => ({
@@ -70,7 +70,10 @@ function Chat({ currentProject }) {
         if (!data.success || !data.pending) return;
 
         if (data.pending === "toolAction") {
-          setPendingToolAction(data.data);
+          const raw = data.data;
+          setPendingToolAction(raw && raw.id && !raw.actionId
+            ? { ...raw.payload, type: raw.type === "git_commit" ? "commit" : raw.type === "github_publish" ? "publish" : raw.type, actionId: raw.id }
+            : raw);
         } else if (data.pending === "plan") {
           setPendingPlan(data.data);
         } else if (data.pending === "diffs") {
@@ -201,6 +204,8 @@ function Chat({ currentProject }) {
           setPendingBlueprint(data);
         } else if (data.action === "commit_proposed") {
           setPendingToolAction({ type: "commit", actionId: data.actionId, message: data.message, diffPreview: data.diffPreview });
+        } else if (data.action === "publish_proposed") {
+          setPendingToolAction({ type: "publish", actionId: data.actionId, repoName: data.repoName, visibility: data.visibility, fileCount: data.fileCount, filesPreview: data.filesPreview, moreFiles: data.moreFiles });
         } else if (data.action === "install_proposed") {
           setPendingToolAction({ type: "install", actionId: data.actionId, packageName: data.packageName });
         } else {
@@ -372,6 +377,8 @@ function Chat({ currentProject }) {
         result.action === "commit_failed" ? `❌ Commit failed: ${result.reason}` :
         result.action === "install_applied" ? `✅ Installed in ${result.projectDir}:\n${result.stdout}` :
         result.action === "install_failed" ? `❌ Install failed: ${result.reason}` :
+        result.action === "publish_applied" ? `✅ Published privately: ${result.url || result.repoName}` :
+        result.action === "publish_failed" ? `❌ Publish failed (${result.stage}): ${result.reason}` :
         `Action result: ${JSON.stringify(result)}`;
 
       setMessages((prev) => [...prev, { role: "assistant", content: summary }]);
@@ -653,7 +660,15 @@ function Chat({ currentProject }) {
               <pre className="diff-pre">{pendingToolAction.diffPreview}</pre>
             </>
           ) : (
+            pendingToolAction.type === "publish" ? (
+            <>
+              <p className="panel-title">publish to GitHub as a private repo: {pendingToolAction.repoName}</p>
+              <p className="panel-hint">{pendingToolAction.fileCount} files · sensitive filenames are re-checked when you approve</p>
+              <pre className="diff-pre">{(pendingToolAction.filesPreview || []).join("\n")}{pendingToolAction.moreFiles > 0 ? "\n…and " + pendingToolAction.moreFiles + " more" : ""}</pre>
+            </>
+          ) : (
             <p className="panel-title">about to run: npm install {pendingToolAction.packageName}</p>
+          )
           )}
           {toolActionStatus && <p className="panel-hint">{toolActionStatus}</p>}
           <div className="panel-actions">
