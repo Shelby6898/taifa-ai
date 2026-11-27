@@ -34,7 +34,7 @@ flowchart TD
 
 Two custom Ollama models are created from the supplied Modelfiles. The 3B model handles code generation, planning, tests, and documentation. The 1.5B model is used for free-form chat and commit-message drafting. Both use a 6,144-token context window.
 
-Project indexes and dependency graphs are rebuildable caches derived from workspace files; PostgreSQL stores durable application state.
+Project indexes and dependency graphs are rebuildable caches derived from workspace files. PostgreSQL stores durable project data such as conversation history, memory, plans, and campaign state; local user account records are kept separately in `backend/data/users.json` with bcrypt-hashed passwords.
 
 ## Core capabilities
 
@@ -119,7 +119,7 @@ Generate a suitable value with:
 openssl rand -hex 32
 ```
 
-Keep `backend/.env` and local account data private. User accounts are stored locally in `backend/data/users.json`; passwords are hashed with bcryptjs.
+Keep `backend/.env` and local account data private. User accounts are stored locally in `backend/data/users.json`; passwords are hashed with bcryptjs. This is a local-first setup, not an automatic security guarantee: do not expose the backend, database, or account file to an untrusted network without adding and reviewing appropriate network, access-control, and deployment protections.
 
 ### 5. Install dependencies
 
@@ -225,8 +225,12 @@ npm run build
 
 ```text
 taifa-ai/
-├── backend/       # API, authentication, inference orchestration,
-│                  # validation, tools, persistence, and tests
+├── backend/       # Express API, authentication, inference, validation,
+│                  # project tools, persistence, and tests
+│   ├── codeValidator.js
+│   ├── pathSafety.js
+│   ├── planState.js
+│   └── conversationHistory.js
 ├── frontend/      # React application
 ├── docs/          # Project documentation
 ├── scripts/       # Development and maintenance scripts
@@ -236,6 +240,8 @@ taifa-ai/
 └── README.md
 ```
 
+The backend filenames above highlight representative areas of responsibility; the repository may contain additional modules and tests.
+
 ## Known limitations
 
 - Small local models are useful for scoped tasks but can lose cross-file consistency or fail to follow detailed instructions.
@@ -244,6 +250,10 @@ taifa-ai/
 - Large workspaces can exceed the available context budget; the indexer reports when context is truncated.
 - The first request after an idle watcher has been closed may incur re-indexing work.
 - Initial model and dependency downloads require internet access. Local inference itself uses Ollama rather than a hosted AI API.
+
+## Roadmap
+
+Planned areas of exploration include broader automated test coverage, stronger cross-file validation, clearer recovery and diagnostic feedback, and continued performance tuning for resource-constrained devices. These are development priorities, not claims that every item is already implemented.
 
 ## Project status
 
